@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "command-gate"
+version = "0.1.0"
+description = "Middleware and CLI between AI assistants and managed servers so AI proposes commands, humans approve them, and every action is audited."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "keyring>=25.0",
+    "mcp>=1.0",
+    "paramiko>=3.0",
+    "prompt-toolkit>=3.0",
+    "pydantic>=2.7",
+    "pywinrm>=0.4",
+    "rich>=13.0",
+    "typer>=0.12",
+]
+
+[project.scripts]
+cgate = "cgate.cli.main:app"
+
+[project.optional-dependencies]
+dev = [
+    "basedpyright>=1.13",
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cgate"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "CPY001",
+    "D104",
+    "D203",
+    "D213",
+    "ISC001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
+"tests/*" = ["D", "S101"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Option"]
+
+[tool.basedpyright]
+pythonVersion = "3.12"
+typeCheckingMode = "all"
+useLibraryCodeForTypes = true
+strict = ["src/cgate"]
+# sqlite3.Row.__getitem__ returns Any unconditionally; the row helpers in
+# cgate.db.repositories narrow the Any into str/int/datetime via explicit str()
+# and datetime.fromisoformat() calls, but the underlying API cannot produce
+# typed rows without subclassing sqlite3.Row per column. Disable reportAny
+# only — every other strict rule (reportUnusedCallResult, reportMissingTypeArg,
+# etc.) remains on.
+reportAny = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
