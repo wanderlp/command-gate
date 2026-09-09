@@ -4,28 +4,100 @@
 proposes commands, a human decides what runs, and the tool records what ran, where, why,
 and with what result.
 
+## Install
+
+`cgate` ships as a single binary per platform. Pick yours.
+
+### Windows
+
+1. Download `cgate-windows-amd64.exe` from the [latest release](https://github.com/wanderlp/command-gate/releases/latest).
+2. Move it somewhere on your `PATH` (e.g., `C:\Users\<you>\bin\`).
+3. From any shell:
+
+   ```powershell
+   cgate mcp install
+   ```
+
+   This detects installed IA clients (Claude Code, opencode, Cursor) and registers
+   `cgate` as an MCP server for each one you confirm.
+4. Restart your IA client. Done — Claude Code now exposes `propose_command`,
+   `list_connections`, and `check_status` as tools it can call.
+
+### macOS / Linux
+
+Same flow — download `cgate-macos-arm64` or `cgate-linux-x86_64` from the
+[latest release](https://github.com/wanderlp/command-gate/releases/latest),
+`chmod +x` it, move it to `~/.local/bin` or another `PATH` directory.
+
+### First-run warnings (binaries are not code-signed)
+
+- **Windows SmartScreen**: "Windows protected your PC" → click **More info** →
+  **Run anyway**. One-time per machine.
+- **macOS Gatekeeper**: "cgate can't be opened because it is from an unidentified
+  developer" → right-click the binary → **Open** → confirm. One-time per machine.
+
+Both are unsigned-binary friction, not bugs. Code signing is on the roadmap
+(see Phase 2).
+
+## Typical workflow
+
+```text
+# 1. IA agent calls propose_command via MCP.  Humans never see this step.
+
+# 2. Run the watch TUI.  Approve / reject / bulk-approve per batch.
+$ cgate watch
+[teal]Restart svc X on srv-prdsvcs[/teal]
+  ● Get-Service      [WIN] srv-prdsvcs
+  Approve? [y/n/a/r] y
+  ✓ exited 0 in 142ms
+  ● Restart-Service  [WIN] srv-prdsvcs
+  Approve? [y/n/a/r] n
+  ✗ rejected
+
+# 3. Stay current.
+$ cgate update check
+Latest: cgate 0.2.0 (release v0.2.0)
+Update available: 0.1.0 -> 0.2.0
+Run `cgate update apply` to install.
+```
+
 ## Status
 
-Phase 1 — skeleton
+Phase 1 complete: end-to-end propose → approve → execute → audit loop working.
+108 unit/integration tests pass; ruff + basedpyright clean.
 
 ## Development
 
 ```console
-uv sync
+git clone https://github.com/wanderlp/command-gate.git
+cd command-gate
+uv sync --extra dev
 uv run cgate --version
 uv run pytest
 uv run ruff check .
+uv run basedpyright src
+```
+
+To build a release binary locally:
+
+```console
+uv run python scripts/build-binary.py
+ls dist/
 ```
 
 ## Layout
 
 ```text
 src/cgate/
-├── cli/          # Top-level CLI and command groups
-├── connections/  # Saved server connections
+├── cli/          # Top-level CLI: connections, mcp, update, watch
+├── connections/  # Saved server connections + WinRM/SSH detection + keyring auth
 ├── core/         # Shared paths and primitives
-├── db/           # Local SQLite persistence
+├── db/           # Local SQLite persistence (batches, commands, connections)
 ├── executor/     # WinRM and SSH execution
-├── mcp_server/   # Local MCP server
-└── watch/        # Interactive approval queue
+├── mcp_server/   # MCP server exposing propose_command / list_connections / check_status
+└── watch/        # Interactive approval queue (y/n/a/r controls)
 ```
+
+Release assets are produced by `.github/workflows/release.yml` on every tag push
+(`git tag v0.1.5 && git push origin main v0.1.5`) and uploaded as platform-native
+binaries to a GitHub Release.
