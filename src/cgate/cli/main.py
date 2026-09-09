@@ -8,6 +8,8 @@ import typer
 
 from cgate import __version__
 from cgate.cli.connections import connections_app
+from cgate.cli.mcp import mcp_app
+from cgate.cli.update import update_app
 from cgate.cli.watch import watch_app
 
 app = typer.Typer(
@@ -17,6 +19,8 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 app.add_typer(connections_app, name="connections")
+app.add_typer(mcp_app, name="mcp")
+app.add_typer(update_app, name="update")
 app.add_typer(watch_app, name="watch")
 
 
