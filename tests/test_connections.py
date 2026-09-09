@@ -26,7 +26,7 @@ from cgate.connections.detect import (
     probe_host,
 )
 from cgate.db.connection import Database, connect, init_database
-from cgate.db.repositories import ConnectionsRepo
+from cgate.connections.store import ConnectionsRepo
 from cgate.db.schema import SCHEMA_VERSION
 from cgate.db.types import ServerType
 

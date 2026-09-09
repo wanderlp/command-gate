@@ -17,9 +17,9 @@ from cgate.connections.detect import (
     UnknownHostError,
     probe_host,
 )
+from cgate.connections.store import ConnectionsRepo
 from cgate.core.paths import data_dir
 from cgate.db.connection import Database, init_database
-from cgate.db.repositories import ConnectionsRepo
 from cgate.db.types import ServerType
 
 connections_app = typer.Typer(help="Manage saved server connections.")

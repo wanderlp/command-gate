@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cgate.db.batches import BatchesRepo
+from cgate.db.commands import CommandsRepo
 from cgate.db.connection import Database, connect, init_database
-from cgate.db.repositories import BatchesRepo, CommandsRepo
 from cgate.db.schema import SCHEMA_VERSION
 from cgate.db.types import BatchId, CommandStatus, ServerType
 
