@@ -5,7 +5,7 @@ Designed to migrate to SQL Server in Phase 2 with the same columns.
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -41,4 +41,14 @@ CREATE TABLE IF NOT EXISTS commands (
 
 CREATE INDEX IF NOT EXISTS idx_commands_batch_id ON commands(batch_id);
 CREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status);
+
+CREATE TABLE IF NOT EXISTS connections (
+    alias TEXT PRIMARY KEY,
+    hostname TEXT NOT NULL,
+    server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),
+    detection_ssh INTEGER NOT NULL,
+    detection_winrm INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connections_server_type ON connections(server_type);
 """

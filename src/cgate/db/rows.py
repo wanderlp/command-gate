@@ -10,6 +10,7 @@ from cgate.db.types import (
     Command,
     CommandId,
     CommandStatus,
+    Connection,
     ServerType,
 )
 
@@ -81,4 +82,16 @@ def row_to_command(row: sqlite3.Row) -> Command:
         approved_by=col_opt_str(row, "approved_by"),
         created_at=parse(col_str(row, "created_at")),
         resolved_at=col_opt_dt(row, "resolved_at"),
+    )
+
+
+def row_to_connection(row: sqlite3.Row) -> Connection:
+    """Convert a SQLite row into a typed Connection value object."""
+    return Connection(
+        alias=col_str(row, "alias"),
+        hostname=col_str(row, "hostname"),
+        server_type=ServerType(col_str(row, "server_type")),
+        detection_ssh=bool(col_int(row, "detection_ssh")),
+        detection_winrm=bool(col_int(row, "detection_winrm")),
+        created_at=parse(col_str(row, "created_at")),
     )

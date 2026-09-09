@@ -61,3 +61,15 @@ class Command:
     approved_by: str | None
     created_at: datetime
     resolved_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class Connection:
+    """A saved connection from this machine to a remote server, identified by alias."""
+
+    alias: str
+    hostname: str
+    server_type: ServerType
+    detection_ssh: bool
+    detection_winrm: bool
+    created_at: datetime

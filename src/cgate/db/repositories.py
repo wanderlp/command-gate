@@ -5,13 +5,14 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from cgate.db.connection import Database, connect
-from cgate.db.rows import col_int, iso, row_to_batch, row_to_command
+from cgate.db.rows import col_int, iso, row_to_batch, row_to_command, row_to_connection
 from cgate.db.types import (
     Batch,
     BatchId,
     Command,
     CommandId,
     CommandStatus,
+    Connection,
     ServerType,
 )
 
@@ -62,10 +63,8 @@ class BatchesRepo:
         with connect(self._db) as conn:
             row = conn.execute(
                 """
-                SELECT
-                    id, title, description, requested_by_agent, created_at, resolved_at
-                FROM batches
-                WHERE id = ?
+                SELECT id, title, description, requested_by_agent, created_at, resolved_at
+                FROM batches WHERE id = ?
                 """,
                 (batch_id,),
             ).fetchone()
@@ -76,8 +75,7 @@ class BatchesRepo:
         with connect(self._db) as conn:
             rows = conn.execute(
                 """
-                SELECT
-                    id, title, description, requested_by_agent, created_at, resolved_at
+                SELECT id, title, description, requested_by_agent, created_at, resolved_at
                 FROM batches
                 WHERE resolved_at IS NULL
                 ORDER BY created_at ASC, id ASC
@@ -93,8 +91,7 @@ class BatchesRepo:
         with connect(self._db) as conn:
             _ = conn.execute(
                 """
-                UPDATE batches
-                SET resolved_at = ?
+                UPDATE batches SET resolved_at = ?
                 WHERE id = ? AND resolved_at IS NULL
                 """,
                 (iso(when), batch_id),
@@ -171,11 +168,9 @@ class CommandsRepo:
         with connect(self._db) as conn:
             row = conn.execute(
                 """
-                SELECT
-                    id, batch_id, position, server_alias, server_type,
+                SELECT id, batch_id, position, server_alias, server_type,
                     command, status, result, approved_by, created_at, resolved_at
-                FROM commands
-                WHERE id = ?
+                FROM commands WHERE id = ?
                 """,
                 (command_id,),
             ).fetchone()
@@ -186,11 +181,9 @@ class CommandsRepo:
         with connect(self._db) as conn:
             rows = conn.execute(
                 """
-                SELECT
-                    id, batch_id, position, server_alias, server_type,
+                SELECT id, batch_id, position, server_alias, server_type,
                     command, status, result, approved_by, created_at, resolved_at
-                FROM commands
-                WHERE batch_id = ?
+                FROM commands WHERE batch_id = ?
                 ORDER BY position ASC
                 """,
                 (batch_id,),
@@ -198,10 +191,7 @@ class CommandsRepo:
         return [row_to_command(r) for r in rows]
 
     def update_status(
-        self,
-        command_id: CommandId,
-        *,
-        status: CommandStatus,
+        self, command_id: CommandId, *, status: CommandStatus,
         approved_by: str | None = None,
         result: str | None = None,
     ) -> None:
@@ -210,8 +200,7 @@ class CommandsRepo:
             if status in _TERMINAL_STATUSES:
                 _ = conn.execute(
                     """
-                    UPDATE commands
-                    SET status = ?, approved_by = ?, result = ?, resolved_at = ?
+                    UPDATE commands SET status = ?, approved_by = ?, result = ?, resolved_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -225,9 +214,70 @@ class CommandsRepo:
             else:
                 _ = conn.execute(
                     """
-                    UPDATE commands
-                    SET status = ?, approved_by = ?, result = ?
+                    UPDATE commands SET status = ?, approved_by = ?, result = ?
                     WHERE id = ?
                     """,
                     (status.value, approved_by, result, command_id),
                 )
+
+
+class ConnectionsRepo:
+    """Saved connection CRUD keyed by a user-defined alias."""
+
+    _db: Database  # class-level annotation required by strict mode
+
+    def __init__(self, db: Database) -> None:
+        """Store the database handle for subsequent operations."""
+        self._db = db
+
+    def add(
+        self, *, alias: str, hostname: str, server_type: ServerType,
+        detection_ssh: bool, detection_winrm: bool,
+    ) -> Connection:
+        """Save a connection with its detection signals and current UTC timestamp."""
+        now = datetime.now(UTC)
+        with connect(self._db) as conn:
+            _ = conn.execute(
+                """
+                INSERT INTO connections (alias, hostname, server_type,
+                    detection_ssh, detection_winrm, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (alias, hostname, server_type.value, detection_ssh,
+                 detection_winrm, iso(now)),
+            )
+        return Connection(alias, hostname, server_type, detection_ssh,
+                          detection_winrm, now)
+
+    def get(self, alias: str) -> Connection | None:
+        """Fetch a connection by alias, or None if it is absent."""
+        with connect(self._db) as conn:
+            row = conn.execute(
+                """
+                SELECT alias, hostname, server_type, detection_ssh, detection_winrm,
+                    created_at
+                FROM connections WHERE alias = ?
+                """,
+                (alias,),
+            ).fetchone()
+        return row_to_connection(row) if row is not None else None
+
+    def list_all(self) -> list[Connection]:
+        """Return every saved connection ordered by alias."""
+        with connect(self._db) as conn:
+            rows = conn.execute(
+                """
+                SELECT alias, hostname, server_type, detection_ssh, detection_winrm,
+                    created_at
+                FROM connections ORDER BY alias ASC
+                """
+            ).fetchall()
+        return [row_to_connection(row) for row in rows]
+
+    def remove(self, alias: str) -> bool:
+        """Delete a connection and report whether a row was removed."""
+        with connect(self._db) as conn:
+            cursor = conn.execute(
+                """DELETE FROM connections WHERE alias = ?""", (alias,)
+            )
+        return cursor.rowcount > 0
