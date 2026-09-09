@@ -29,6 +29,28 @@ Same flow — download `cgate-macos-arm64` or `cgate-linux-x86_64` from the
 [latest release](https://github.com/wanderlp/command-gate/releases/latest),
 `chmod +x` it, move it to `~/.local/bin` or another `PATH` directory.
 
+### Via package manager
+
+Manifest templates live under [`packaging/`](./packaging/README.md). Publishing
+them requires creating separate tap/bucket repos (Scoop convention:
+`<user>/scoop-bucket`; Homebrew convention: `<user>/homebrew-tap`) and pasting
+the manifests there with the placeholder SHA256 replaced. See
+`packaging/README.md` for the full flow. Once published, users install with:
+
+```powershell
+# Scoop (Windows)
+scoop bucket add wanderlp https://github.com/wanderlp/scoop-bucket
+scoop install cgate
+```
+
+```bash
+# Homebrew (macOS, Linux)
+brew tap wanderlp/tap
+brew install cgate
+```
+
+Winget is not yet supported — submit path requires PR to `microsoft/winget-pkgs`.
+
 ### First-run warnings (binaries are not code-signed)
 
 - **Windows SmartScreen**: "Windows protected your PC" → click **More info** →
