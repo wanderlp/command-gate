@@ -1,0 +1,75 @@
+name: "Release binaries"
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: "write"
+
+jobs:
+  build:
+    name: "Build ${{ matrix.asset }}"
+    runs-on: "${{ matrix.os }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: "windows-latest"
+            asset: "cgate-windows-amd64.exe"
+          - os: "macos-latest"
+            asset: "cgate-macos-arm64"
+          - os: "ubuntu-latest"
+            asset: "cgate-linux-x86_64"
+    env:
+      UV_CACHE_DIR: "${{ github.workspace }}/.uv-cache"
+    steps:
+      - name: "Check out source"
+        uses: "actions/checkout@v4"
+      - name: "Set up Python"
+        uses: "actions/setup-python@v5"
+        with:
+          python-version: "3.12"
+      - name: "Cache uv packages"
+        uses: "actions/cache@v4"
+        with:
+          path: "${{ env.UV_CACHE_DIR }}"
+          key: >-
+            uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: >-
+            uv-${{ runner.os }}-${{ runner.arch }}-
+      - name: "Install build tools"
+        run: "python -m pip install 'uv>=0.8' 'pyinstaller==6.*'"
+      - name: "Install project dependencies"
+        run: "uv sync --extra dev"
+      - name: "Build binary"
+        run: "uv run python scripts/build-binary.py"
+      - name: "Upload binary artifact"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "${{ matrix.asset }}"
+          path: "dist/${{ matrix.asset }}"
+          if-no-files-found: "error"
+
+  release:
+    name: "Publish GitHub Release"
+    needs: "build"
+    runs-on: "ubuntu-latest"
+    steps:
+      - name: "Download binary artifacts"
+        uses: "actions/download-artifact@v4"
+        with:
+          path: "."
+          merge-multiple: true
+      - name: "Create GitHub Release"
+        uses: "softprops/action-gh-release@v2"
+        with:
+          tag_name: "${{ github.ref_name }}"
+          name: "cgate ${{ github.ref_name }}"
+          body: "Auto-generated release for ${{ github.ref_name }}."
+          files: |
+            cgate-windows-amd64.exe
+            cgate-macos-arm64
+            cgate-linux-x86_64
+          fail_on_unmatched_files: true
