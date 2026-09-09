@@ -66,11 +66,11 @@ typeCheckingMode = "all"
 useLibraryCodeForTypes = true
 strict = ["src/cgate"]
 # sqlite3.Row.__getitem__ returns Any unconditionally; the row helpers in
-# cgate.db.repositories narrow the Any into str/int/datetime via explicit str()
-# and datetime.fromisoformat() calls, but the underlying API cannot produce
-# typed rows without subclassing sqlite3.Row per column. Disable reportAny
-# only — every other strict rule (reportUnusedCallResult, reportMissingTypeArg,
-# etc.) remains on.
+# cgate.db.rows (col_str/col_int/col_opt_str/col_opt_dt + row_to_*) narrow
+# the Any into str/int/datetime via explicit str() and datetime.fromisoformat()
+# calls, but the underlying API cannot produce typed rows without subclassing
+# sqlite3.Row per column. Disable reportAny only — every other strict rule
+# (reportUnusedCallResult, reportMissingTypeArg, etc.) remains on.
 reportAny = false
 
 [tool.pytest.ini_options]

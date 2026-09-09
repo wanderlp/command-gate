@@ -25,8 +25,8 @@ from cgate.connections.detect import (
     UnknownHostError,
     probe_host,
 )
-from cgate.db.connection import Database, connect, init_database
 from cgate.connections.store import ConnectionsRepo
+from cgate.db.connection import Database, connect, init_database
 from cgate.db.schema import SCHEMA_VERSION
 from cgate.db.types import ServerType
 
