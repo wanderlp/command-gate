@@ -81,9 +81,9 @@ def install_cmd(
             if is_registered(client)
             else "[red]not registered[/red]"
         )
-    console.print(
-        f"  - {client.label} [dim]({client.config_path})[/dim] -- {status}"
-    )
+        console.print(
+            f"  - {client.label} [dim]({client.config_path})[/dim] -- {status}"
+        )
 
     command, args = current_binary_command()
     console.print(

@@ -5,9 +5,13 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
+from typer.testing import CliRunner
 
+if TYPE_CHECKING:
+    pass
+
+from cgate.cli.main import app
 from cgate.mcp_installer import (
     ClientInstall,
     current_binary_command,
@@ -156,3 +160,49 @@ def test_current_binary_command_returns_exe_path_when_frozen(
 
     assert Path(command) == Path(executable).resolve()
     assert args == ["mcp", "serve"]
+
+
+def test_install_cmd_shows_one_status_line_per_detected_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for issue #3: each detected client must get its own
+    status line in the ``Detected N IA client(s)`` block. Before the
+    fix the print was indented outside the ``for`` loop, so only the
+    LAST client was printed (and only once)."""
+    claude = ClientInstall(
+        name="claude", label="Claude Code", config_path=Path("/fake/.claude.json")
+    )
+    opencode = ClientInstall(
+        name="opencode",
+        label="opencode",
+        config_path=Path("/fake/.config/opencode/opencode.jsonc"),
+    )
+    monkeypatch.setattr("cgate.cli.mcp.detect_clients", lambda: [claude, opencode])
+
+    def fake_is_registered(client: ClientInstall) -> bool:
+        return client.name == "claude"
+
+    monkeypatch.setattr("cgate.cli.mcp.is_registered", fake_is_registered)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["mcp", "install", "--dry-run", "--yes"])
+
+    assert result.exit_code == 0, result.stdout
+
+    # Filter to the per-client status lines (the "  - <label> ..." lines).
+    status_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if "  - Claude Code" in line or "  - opencode" in line
+    ]
+    assert len(status_lines) == 2, (
+        f"Expected exactly 2 status lines (one per client); got "
+        f"{len(status_lines)}: {status_lines!r}"
+    )
+
+    claude_line = next(line for line in status_lines if "Claude Code" in line)
+    assert "registered" in claude_line
+    assert "not registered" not in claude_line
+
+    opencode_line = next(line for line in status_lines if "opencode" in line)
+    assert "not registered" in opencode_line
