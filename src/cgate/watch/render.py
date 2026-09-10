@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 
 
 def render_lot_header(batch: Batch) -> str:
-    """Render a teal title and an optional grey italic description."""
-    lines = [f"[teal]{batch.title}[/teal]"]
+    """Render a cyan title and an optional grey italic description."""
+    lines = [f"[cyan]{batch.title}[/cyan]"]
     if batch.description:
         lines.append(f"[grey50 italic]{batch.description}[/grey50 italic]")
     return "\n".join(lines)
@@ -68,4 +68,4 @@ def build_lot_panel(
     """Compose a lot header and its FIFO command rows in one panel."""
     body = [render_lot_header(batch), ""]
     body.extend(render_command_row(command) for command in commands_for_batch)
-    return Panel("\n".join(body), box=ROUNDED, border_style="teal")
+    return Panel("\n".join(body), box=ROUNDED, border_style="cyan")

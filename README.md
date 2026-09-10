@@ -68,7 +68,7 @@ Both are unsigned-binary friction, not bugs. Code signing is on the roadmap
 
 # 2. Run the watch TUI.  Approve / reject / bulk-approve per batch.
 $ cgate watch
-[teal]Restart svc X on srv-prdsvcs[/teal]
+[cyan]Restart svc X on srv-prdsvcs[/cyan]
   ● Get-Service      [WIN] srv-prdsvcs
   Approve? [y/n/a/r] y
   ✓ exited 0 in 142ms
