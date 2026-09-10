@@ -8,6 +8,7 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from packaging.version import InvalidVersion, Version
 from pathlib import Path
 from typing import Final, NotRequired, TypedDict
 
@@ -114,19 +115,34 @@ def _platform_suffix() -> str:
 
 
 def compare_versions(current: str, latest: str) -> int:
-    """Compare dotted versions, returning 1 when ``latest`` is newer."""
+    """Compare versions per PEP 440.
 
-    def parse(version: str) -> tuple[int, ...] | None:
+    Returns positive when ``current`` is newer than ``latest``, zero when
+    equal, negative when ``current`` is older. Dev segments (``0.1.6.dev1``)
+    and local segments (``+g<hash>``) are handled correctly, unlike a naive
+    split-and-compare which falls back to lexicographic order on those.
+
+    Falls back to lexicographic comparison when either string is not a
+    valid PEP 440 version, so legacy data sources cannot crash the updater.
+    """
+
+    def _parse(version: str) -> Version | None:
         try:
-            return tuple(int(part) for part in version.split("."))
-        except ValueError:
+            return Version(version)
+        except InvalidVersion:
             return None
 
-    parsed_current = parse(current)
-    parsed_latest = parse(latest)
+    parsed_current = _parse(current)
+    parsed_latest = _parse(latest)
     if parsed_current is not None and parsed_latest is not None:
-        return (parsed_latest > parsed_current) - (parsed_latest < parsed_current)
-    return (latest > current) - (latest < current)
+        if parsed_current > parsed_latest:
+            return 1
+        if parsed_current < parsed_latest:
+            return -1
+        return 0
+    if latest != current:
+        return (current > latest) - (current < latest)
+    return 0
 
 
 def download_to(asset: Asset, dest: Path) -> None:

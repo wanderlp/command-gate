@@ -14,7 +14,7 @@ from cgate.cli.watch import watch_app
 
 app = typer.Typer(
     name="cgate",
-    help="Middleware/CLI between AI agents and servers — IA proposes, human approves.",
+    help="Middleware/CLI between AI agents and servers -- IA proposes, human approves.",
     no_args_is_help=True,
     invoke_without_command=True,
 )

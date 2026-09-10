@@ -11,6 +11,7 @@ import mcp.server.stdio
 from mcp import types
 from mcp.server import Server, ServerRequestContext
 
+from cgate import __version__
 from cgate.connections.store import ConnectionsRepo
 from cgate.core.paths import data_dir
 from cgate.db.batches import BatchesRepo
@@ -195,7 +196,7 @@ def build_server() -> Server[None]:
 
     return Server(
         "command-gate",
-        version="0.1.0",
+        version=__version__,
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
         lifespan=_lifespan,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,7 +66,10 @@ def test_built_binary_exposes_the_complete_cli(tmp_path: Path) -> None:
 
         # Then: the binary exposes version, command groups, and database-backed behavior.
         assert version.returncode == 0, version.stderr
-        assert "0.1.0" in version.stdout
+        # The version baked into the PyInstaller binary comes from the nearest
+        # git tag at build time (see scripts/_ensure_version.py); assert shape
+        # only so this test stays valid for every release.
+        assert re.search(r"^cgate \d+\.\d+\.\d+", version.stdout), version.stdout
         assert root_help.returncode == 0, root_help.stderr
         assert all(command in root_help.stdout for command in ("connections", "watch"))
         assert connections_help.returncode == 0, connections_help.stderr

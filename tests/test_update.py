@@ -44,12 +44,27 @@ def test_parse_release_extracts_assets_and_version() -> None:
     )
 
 
-def test_compare_versions_returns_1_when_latest_higher() -> None:
-    assert compare_versions("0.1.0", "0.1.5") == 1
+def test_compare_versions_returns_positive_when_current_is_newer() -> None:
+    assert compare_versions("0.1.5", "0.1.0") == 1
+
+
+def test_compare_versions_returns_negative_when_current_is_older() -> None:
+    assert compare_versions("0.1.0", "0.1.5") == -1
 
 
 def test_compare_versions_returns_zero_when_equal() -> None:
     assert compare_versions("0.1.0", "0.1.0") == 0
+
+
+def test_compare_versions_handles_pep440_dev_segments() -> None:
+    # A dev release of the next minor is newer than the previous release.
+    assert compare_versions("0.1.6.dev1", "0.1.5") == 1
+    assert compare_versions("0.1.5", "0.1.6.dev1") == -1
+
+
+def test_compare_versions_handles_local_segments() -> None:
+    assert compare_versions("0.1.6.dev1+gabc1234", "0.1.5") == 1
+    assert compare_versions("0.1.5", "0.1.6.dev1+gabc1234") == -1
 
 
 def test_select_asset_picks_matching_platform(monkeypatch: pytest.MonkeyPatch) -> None:

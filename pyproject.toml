@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "command-gate"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Middleware and CLI between AI assistants and managed servers so AI proposes commands, humans approve them, and every action is audited."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "keyring>=25.0",
     "mcp>=1.0",
+    "packaging>=23.0",
     "paramiko>=3.0",
     "prompt-toolkit>=3.0",
     "pydantic>=2.7",
@@ -26,6 +27,7 @@ cgate = "cgate.cli.main:app"
 [project.optional-dependencies]
 dev = [
     "basedpyright>=1.13",
+    "hatch-vcs>=0.5",
     "pyinstaller>=6.0",
     "pytest>=8",
     "pytest-cov>=5",
@@ -34,6 +36,12 @@ dev = [
 
 [tool.uv]
 package = true
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/cgate/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cgate"]

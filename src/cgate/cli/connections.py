@@ -114,8 +114,8 @@ def list_cmd() -> None:
             connection.alias,
             connection.hostname,
             connection.server_type.value,
-            "✓" if connection.detection_ssh else "✗",
-            "✓" if connection.detection_winrm else "✗",
+            "Y" if connection.detection_ssh else "N",
+            "Y" if connection.detection_winrm else "N",
             connection.created_at.isoformat(),
         )
     console.print(table)
