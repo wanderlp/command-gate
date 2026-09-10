@@ -9,6 +9,7 @@ import typer
 from cgate import __version__
 from cgate.cli.connections import connections_app
 from cgate.cli.mcp import mcp_app
+from cgate.cli.uninstall import uninstall_cmd
 from cgate.cli.update import update_app
 from cgate.cli.watch import watch_app
 
@@ -22,6 +23,7 @@ app.add_typer(connections_app, name="connections")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(update_app, name="update")
 app.add_typer(watch_app, name="watch")
+app.command("uninstall")(uninstall_cmd)
 
 
 def _version_callback(*, value: bool) -> None:
