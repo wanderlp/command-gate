@@ -29,32 +29,46 @@ def execute_windows(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     https: bool = True,
 ) -> ExecutionResult:
-    """Run a command on a host over WinRM with NTLM authentication."""
-    started = time.monotonic()
-    try:
-        session = winrm.Session(
-            _endpoint(hostname, https=https),
-            auth=(credential.username, credential.password or ""),
-            transport="ntlm",
-            # pywinrm requires ``read_timeout_sec > operation_timeout_sec``;
-            # otherwise it raises ``read_timeout_sec must exceed
-            # operation_timeout_sec``. The operation budget covers the
-            # round-trip + remote execution; the read budget also has to
-            # cover pulling the response back, so we add a fixed margin.
-            operation_timeout_sec=timeout,
-            read_timeout_sec=timeout + 30,
-        )
-        response = session.run_cmd(command)
-    except Exception as exc:  # noqa: BLE001 - SDK errors lack a closed common hierarchy
-        return _failure_from_winrm_exception(exc, started)
+    """Run a command on a host over WinRM with NTLM authentication.
 
-    return ExecutionResult(
-        stdout=_decode_output(response.std_out),
-        stderr=_decode_output(response.std_err),
-        exit_code=int(response.status_code),
-        duration_ms=int((time.monotonic() - started) * 1000),
-        error_kind=None,
-    )
+    Prefers the protocol requested by the caller (defaults to HTTPS for
+    the secure WinRM config) but falls back to the other protocol when
+    the primary listener is unreachable. WinRM operators commonly run
+    HTTP on port 5985 for internal/lab hosts where TLS is not wired
+    up, so a connection refused on 5986 should not be fatal when 5985
+    is available.
+    """
+    started = time.monotonic()
+    last_exc: Exception | None = None
+    for attempt_https in (https, not https):
+        try:
+            session = winrm.Session(
+                _endpoint(hostname, https=attempt_https),
+                auth=(credential.username, credential.password or ""),
+                transport="ntlm",
+                # pywinrm requires ``read_timeout_sec > operation_timeout_sec``;
+                # otherwise it raises ``read_timeout_sec must exceed
+                # operation_timeout_sec``. The operation budget covers the
+                # round-trip + remote execution; the read budget also has
+                # to cover pulling the response back, so we add a fixed
+                # margin.
+                operation_timeout_sec=timeout,
+                read_timeout_sec=timeout + 30,
+            )
+            response = session.run_cmd(command)
+            return ExecutionResult(
+                stdout=_decode_output(response.std_out),
+                stderr=_decode_output(response.std_err),
+                exit_code=int(response.status_code),
+                duration_ms=int((time.monotonic() - started) * 1000),
+                error_kind=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - SDK errors lack a closed common hierarchy
+            last_exc = exc
+            continue
+
+    assert last_exc is not None  # loop ran at least once
+    return _failure_from_winrm_exception(last_exc, started)
 
 
 def _decode_output(output: str | bytes | bytearray | None) -> str:

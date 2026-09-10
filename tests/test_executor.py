@@ -224,3 +224,68 @@ def test_execute_windows_passes_read_timeout_strictly_greater_than_operation() -
         )
         # The margin must be non-zero (no equality regression).
         assert kwargs["read_timeout_sec"] != kwargs["operation_timeout_sec"]
+
+
+def test_execute_windows_falls_back_to_http_when_https_unreachable() -> None:
+    """WinRM operators commonly run HTTP-only listeners (port 5985) on
+    internal hosts. cgate should try the caller's preferred protocol
+    first, then fall back to the other one so a refused HTTPS
+    connection does not fail the whole execute when HTTP would have
+    worked.
+    """
+    session_factory = MagicMock()
+
+    def make_session(endpoint, **kwargs):
+        if endpoint.startswith("https://"):
+            raise OSError("HTTPSConnection: connection refused")
+        s = MagicMock()
+        s.run_cmd.return_value = MagicMock(
+            std_out="hello\n", std_err="", status_code=0
+        )
+        return s
+
+    session_factory.side_effect = make_session
+
+    with patch("cgate.executor.winrm.winrm.Session", session_factory):
+        result = execute_windows("http-host.example", "Get-Service", _credential())
+
+    assert result.ok is True
+    assert result.stdout == "hello\n"
+    # Two attempts: first https (refused), then http (succeeded).
+    assert session_factory.call_count == 2
+    endpoints = [call.args[0] for call in session_factory.call_args_list]
+    assert endpoints == [
+        "https://http-host.example:5986/wsman",
+        "http://http-host.example:5985/wsman",
+    ]
+
+
+def test_execute_windows_falls_back_to_https_when_http_unreachable() -> None:
+    """Mirror of the above: caller requests HTTP, but the server only
+    exposes HTTPS. The fallback must work in either direction.
+    """
+    session_factory = MagicMock()
+
+    def make_session(endpoint, **kwargs):
+        if endpoint.startswith("http://"):
+            raise OSError("HTTPConnection: connection refused")
+        s = MagicMock()
+        s.run_cmd.return_value = MagicMock(
+            std_out="hello\n", std_err="", status_code=0
+        )
+        return s
+
+    session_factory.side_effect = make_session
+
+    with patch("cgate.executor.winrm.winrm.Session", session_factory):
+        result = execute_windows(
+            "https-host.example", "Get-Service", _credential(), https=False
+        )
+
+    assert result.ok is True
+    endpoints = [call.args[0] for call in session_factory.call_args_list]
+    # Caller asked for HTTP first; HTTPS is the fallback.
+    assert endpoints == [
+        "http://https-host.example:5985/wsman",
+        "https://https-host.example:5986/wsman",
+    ]
