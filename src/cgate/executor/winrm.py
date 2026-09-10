@@ -37,6 +37,14 @@ def execute_windows(
     HTTP on port 5985 for internal/lab hosts where TLS is not wired
     up, so a connection refused on 5986 should not be fatal when 5985
     is available.
+
+    Commands are executed via PowerShell (``session.run_ps``) rather
+    than the legacy cmd shell. PowerShell handles both PowerShell
+    cmdlets (``Get-ChildItem``, ``Set-Service``, ...) and classic
+    cmd-line utilities (``dir``, ``type``, ...) transparently, so this
+    covers the common cases without forcing users to wrap commands
+    manually. Per-server shell selection (or cmd-vs-ps fallback) is
+    deferred to a future iteration.
     """
     started = time.monotonic()
     last_exc: Exception | None = None
@@ -55,7 +63,7 @@ def execute_windows(
                 operation_timeout_sec=timeout,
                 read_timeout_sec=timeout + 30,
             )
-            response = session.run_cmd(command)
+            response = session.run_ps(command)
             return ExecutionResult(
                 stdout=_decode_output(response.std_out),
                 stderr=_decode_output(response.std_err),

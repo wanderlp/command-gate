@@ -52,7 +52,7 @@ def test_result_ok_false_when_error_kind_set() -> None:
 def test_execute_windows_happy_path_returns_zero_exit_code() -> None:
     session_factory = MagicMock()
     response = MagicMock(std_out=b"hello\r\n", std_err=b"", status_code=0)
-    session_factory.return_value.run_cmd.return_value = response
+    session_factory.return_value.run_ps.return_value = response
 
     with patch("cgate.executor.winrm.winrm.Session", session_factory):
         result = execute_windows("10.0.0.1", "Get-Service", _credential())
@@ -207,7 +207,7 @@ def test_execute_windows_passes_read_timeout_strictly_greater_than_operation() -
     response.std_out = ""
     response.std_err = ""
     response.status_code = 0
-    session_factory.return_value.run_cmd.return_value = response
+    session_factory.return_value.run_ps.return_value = response
 
     with patch("cgate.executor.winrm.winrm.Session", session_factory):
         for timeout in (5.0, 30.0, 120.0):
@@ -239,7 +239,7 @@ def test_execute_windows_falls_back_to_http_when_https_unreachable() -> None:
         if endpoint.startswith("https://"):
             raise OSError("HTTPSConnection: connection refused")
         s = MagicMock()
-        s.run_cmd.return_value = MagicMock(
+        s.run_ps.return_value = MagicMock(
             std_out="hello\n", std_err="", status_code=0
         )
         return s
@@ -270,7 +270,7 @@ def test_execute_windows_falls_back_to_https_when_http_unreachable() -> None:
         if endpoint.startswith("http://"):
             raise OSError("HTTPConnection: connection refused")
         s = MagicMock()
-        s.run_cmd.return_value = MagicMock(
+        s.run_ps.return_value = MagicMock(
             std_out="hello\n", std_err="", status_code=0
         )
         return s
@@ -289,3 +289,25 @@ def test_execute_windows_falls_back_to_https_when_http_unreachable() -> None:
         "http://https-host.example:5985/wsman",
         "https://https-host.example:5986/wsman",
     ]
+
+
+def test_execute_windows_uses_powershell_not_cmd() -> None:
+    """Regression: cgate executes Windows commands via ``run_ps`` (PowerShell),
+    not ``run_cmd`` (legacy cmd.exe). PowerShell supports both PowerShell
+    cmdlets and classic cmd-line utilities, so using it as the default
+    avoids the ``'Get-ChildItem' is not recognized as an internal or
+    external command`` failure users saw when their commands were
+    PowerShell-only.
+    """
+    session_factory = MagicMock()
+    response = MagicMock(std_out="ok", std_err="", status_code=0)
+    session_factory.return_value.run_ps.return_value = response
+
+    with patch("cgate.executor.winrm.winrm.Session", session_factory):
+        result = execute_windows("host.example", "Get-ChildItem C:\\", _credential())
+
+    session_factory.return_value.run_ps.assert_called_once_with(
+        "Get-ChildItem C:\\"
+    )
+    session_factory.return_value.run_cmd.assert_not_called()
+    assert result.ok is True
