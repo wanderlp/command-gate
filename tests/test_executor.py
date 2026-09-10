@@ -64,8 +64,10 @@ def test_execute_windows_happy_path_returns_zero_exit_code() -> None:
         "https://10.0.0.1:5986/wsman",
         auth=("operator", "8"),
         transport="ntlm",
-        read_timeout_sec=30.0,
+        # pywinrm requires read_timeout_sec > operation_timeout_sec;
+        # cgate passes timeout + 30. See test below for the regression.
         operation_timeout_sec=30.0,
+        read_timeout_sec=60.0,
     )
 
 
@@ -190,3 +192,35 @@ def test_execute_command_auto_loads_credential_from_keyring_when_not_provided() 
     assert result is expected
     load.assert_called_once_with("server")
     windows.assert_called_once_with("server.example", "hostname", credential, timeout=30.0)
+
+
+def test_execute_windows_passes_read_timeout_strictly_greater_than_operation() -> None:
+    """pywinrm rejects ``read_timeout_sec <= operation_timeout_sec`` at
+    Session construction time with ``read_timeout_sec must exceed
+    operation_timeout_sec``. Regression: prior code passed the same
+    value for both, which made every WinRM execute crash before any
+    network round-trip. The two timeouts must always satisfy
+    ``read > operation`` regardless of the user-supplied timeout.
+    """
+    session_factory = MagicMock()
+    response = MagicMock()
+    response.std_out = ""
+    response.std_err = ""
+    response.status_code = 0
+    session_factory.return_value.run_cmd.return_value = response
+
+    with patch("cgate.executor.winrm.winrm.Session", session_factory):
+        for timeout in (5.0, 30.0, 120.0):
+            execute_windows(
+                "win.example", "hostname", _credential(), timeout=timeout
+            )
+
+    assert session_factory.call_count == 3
+    for call in session_factory.call_args_list:
+        kwargs = call.kwargs
+        assert kwargs["read_timeout_sec"] > kwargs["operation_timeout_sec"], (
+            f"read_timeout_sec={kwargs['read_timeout_sec']} must exceed "
+            f"operation_timeout_sec={kwargs['operation_timeout_sec']}"
+        )
+        # The margin must be non-zero (no equality regression).
+        assert kwargs["read_timeout_sec"] != kwargs["operation_timeout_sec"]

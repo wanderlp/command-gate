@@ -36,8 +36,13 @@ def execute_windows(
             _endpoint(hostname, https=https),
             auth=(credential.username, credential.password or ""),
             transport="ntlm",
-            read_timeout_sec=timeout,
+            # pywinrm requires ``read_timeout_sec > operation_timeout_sec``;
+            # otherwise it raises ``read_timeout_sec must exceed
+            # operation_timeout_sec``. The operation budget covers the
+            # round-trip + remote execution; the read budget also has to
+            # cover pulling the response back, so we add a fixed margin.
             operation_timeout_sec=timeout,
+            read_timeout_sec=timeout + 30,
         )
         response = session.run_cmd(command)
     except Exception as exc:  # noqa: BLE001 - SDK errors lack a closed common hierarchy
