@@ -38,6 +38,19 @@ def _db() -> Database:
 @connections_app.command("add")
 def add(alias: str, hostname: str) -> None:
     """Detect the server type, save the connection, and collect credentials."""
+    # Pre-check alias before doing any network probe or prompting for
+    # credentials. Without this, a duplicate alias wastes the user's
+    # time on a probe plus username/password prompts before the
+    # IntegrityError surfaces. See issue #16.
+    repo = ConnectionsRepo(_db())
+    if repo.get(alias) is not None:
+        console.print(
+            f"[red]Error:[/red] A connection with alias [bold]'{alias}'[/bold] "
+            f"already exists. Use [bold]cgate connections remove {alias}[/bold] "
+            f"first, or choose a different alias."
+        )
+        raise typer.Exit(code=1) from None
+
     probe = probe_host(hostname)
     try:
         server_type = probe.server_type
@@ -53,7 +66,6 @@ def add(alias: str, hostname: str) -> None:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
 
-    repo = ConnectionsRepo(_db())
     try:
         _ = repo.add(
             alias=alias,
@@ -63,9 +75,9 @@ def add(alias: str, hostname: str) -> None:
             detection_winrm=probe.winrm,
         )
     except sqlite3.IntegrityError:
-        # The only UNIQUE constraint on connections is `alias`. Surface
-        # a friendly message instead of the raw traceback the user
-        # would otherwise see (issue #1).
+        # Race fallback: between the pre-check above and this INSERT,
+        # another process could have added the same alias. Surface the
+        # same friendly message instead of a raw traceback (issue #1).
         console.print(
             f"[red]Error:[/red] A connection with alias [bold]'{alias}'[/bold] "
             f"already exists. Use [bold]cgate connections remove {alias}[/bold] "

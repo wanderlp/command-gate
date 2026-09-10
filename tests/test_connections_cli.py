@@ -81,6 +81,53 @@ def test_connections_add_reports_duplicate_alias_friendly(
     assert "IntegrityError" not in second.stdout
 
 
+def test_connections_add_skips_network_probe_when_alias_exists(
+    runner: CliRunner,
+    isolated_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #16: a duplicate alias must short-circuit BEFORE the
+    network probe and credential prompts so the user does not waste
+    time on a host that the alias collision has already invalidated.
+    """
+    monkeypatch.setattr("cgate.cli.connections.is_kerberos_available", lambda: True)
+
+    probe_calls: list[str] = []
+
+    def counting_probe(hostname: str):
+        probe_calls.append(hostname)
+        probe = MagicMock()
+        probe.server_type = ServerType.LINUX
+        probe.ssh = True
+        probe.winrm = False
+        return probe
+
+    with patch("cgate.cli.connections.probe_host", side_effect=counting_probe):
+        # First add seeds the DB with this alias.
+        first = runner.invoke(
+            app,
+            ["connections", "add", "srv-test", "first.example.com"],
+        )
+        assert first.exit_code == 0, first.stdout
+        assert probe_calls == ["first.example.com"]
+
+        # Second add with the same alias must NOT call probe_host at all
+        # -- the user should not pay for a network round-trip + prompts
+        # for an alias that is already taken.
+        probe_calls.clear()
+        second = runner.invoke(
+            app,
+            ["connections", "add", "srv-test", "second.example.com"],
+        )
+
+    assert second.exit_code == 1
+    assert probe_calls == [], (
+        f"probe_host should not be called for a duplicate alias; "
+        f"got calls for: {probe_calls!r}"
+    )
+    assert "already exists" in second.stdout
+
+
 def test_connections_add_succeeds_for_new_alias(
     runner: CliRunner,
     isolated_env: dict[str, Path],
