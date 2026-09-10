@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import typer
 from click import Choice
 from rich.console import Console
@@ -52,13 +54,24 @@ def add(alias: str, hostname: str) -> None:
         raise typer.Exit(code=1) from exc
 
     repo = ConnectionsRepo(_db())
-    _ = repo.add(
-        alias=alias,
-        hostname=hostname,
-        server_type=server_type,
-        detection_ssh=probe.ssh,
-        detection_winrm=probe.winrm,
-    )
+    try:
+        _ = repo.add(
+            alias=alias,
+            hostname=hostname,
+            server_type=server_type,
+            detection_ssh=probe.ssh,
+            detection_winrm=probe.winrm,
+        )
+    except sqlite3.IntegrityError:
+        # The only UNIQUE constraint on connections is `alias`. Surface
+        # a friendly message instead of the raw traceback the user
+        # would otherwise see (issue #1).
+        console.print(
+            f"[red]Error:[/red] A connection with alias [bold]'{alias}'[/bold] "
+            f"already exists. Use [bold]cgate connections remove {alias}[/bold] "
+            f"first, or choose a different alias."
+        )
+        raise typer.Exit(code=1) from None
     console.print(f"Saved [bold]{alias}[/bold] -> {hostname} ({server_type.value}).")
 
     if is_kerberos_available():
