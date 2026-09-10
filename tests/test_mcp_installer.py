@@ -27,12 +27,41 @@ def _client(path: Path) -> ClientInstall:
 def test_detect_clients_finds_existing_configs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    config = tmp_path / ".claude" / "mcp.json"
-    config.parent.mkdir()
+    """Regression for issue #2: Claude Code's actual config path is
+    ``~/.claude.json``, NOT ``~/.claude/mcp.json``."""
+    config = tmp_path / ".claude.json"
     config.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     assert detect_clients() == [_client(config)]
+
+
+def test_detect_clients_finds_claude_via_settings_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Alternative Claude Code location: ``~/.claude/settings.json``."""
+    config = tmp_path / ".claude" / "settings.json"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    assert detect_clients() == [_client(config)]
+
+
+def test_detect_clients_prefers_first_path_when_multiple_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When BOTH Claude Code paths exist, the first one in
+    CONFIG_FILENAMES wins so register/unregister write back to the same
+    file that was detected."""
+    primary = tmp_path / ".claude.json"
+    secondary = tmp_path / ".claude" / "settings.json"
+    secondary.parent.mkdir(parents=True)
+    primary.write_text("{}", encoding="utf-8")
+    secondary.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    assert detect_clients() == [_client(primary)]
 
 
 def test_detect_clients_returns_empty_when_none_installed(

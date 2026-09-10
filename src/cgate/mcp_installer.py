@@ -14,12 +14,19 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
 
-# This machine and current OpenCode documentation use the XDG-style global
-# config path below. OpenCode's local-server command is one argv array.
+# Multiple paths per client because some clients (notably Claude Code)
+# store their MCP config in more than one location. Ordered: when a
+# client is detected, the FIRST existing path is used as the primary
+# config_path for register/unregister/is_registered. Paths are home-
+# relative and joined with Path.home() at detection time.
 CONFIG_FILENAMES: Final = {
-    "claude": ".claude/mcp.json",
-    "opencode": ".config/opencode/opencode.jsonc",
-    "cursor": ".cursor/mcp.json",
+    # Claude Code does NOT use ``~/.claude/mcp.json`` -- it stores MCP
+    # servers in ``~/.claude.json`` (legacy global) or
+    # ``~/.claude/settings.json`` (project-level global). The first
+    # existing one wins. See issue #2.
+    "claude": (".claude.json", ".claude/settings.json"),
+    "opencode": (".config/opencode/opencode.jsonc",),
+    "cursor": (".cursor/mcp.json",),
 }
 CONFIG_KEYS: Final = {
     "claude": "mcpServers",
@@ -44,13 +51,27 @@ class ClientInstall:
 
 
 def detect_clients() -> list[ClientInstall]:
-    """Return IA clients whose config file exists under the user's home."""
+    """Return IA clients whose config file exists under the user's home.
+
+    A client is considered "installed" if ANY of the paths listed for it
+    in ``CONFIG_FILENAMES`` exists. When several paths exist (Claude Code
+    can have both ``~/.claude.json`` and ``~/.claude/settings.json``),
+    the FIRST existing path is returned so register/unregister write
+    back to the same file that was detected.
+    """
     home = Path.home()
-    return [
-        ClientInstall(name=name, label=CLIENT_LABEL[name], config_path=home / relative)
-        for name, relative in CONFIG_FILENAMES.items()
-        if (home / relative).exists()
-    ]
+    found: list[ClientInstall] = []
+    for name, relative_paths in CONFIG_FILENAMES.items():
+        for relative in relative_paths:
+            candidate = home / relative
+            if candidate.exists():
+                found.append(
+                    ClientInstall(
+                        name=name, label=CLIENT_LABEL[name], config_path=candidate
+                    )
+                )
+                break
+    return found
 
 
 def read_json(path: Path) -> JsonObject:
