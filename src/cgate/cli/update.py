@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 import time
 from typing import Annotated
 
@@ -11,6 +13,7 @@ import typer
 from rich.console import Console
 
 from cgate import __version__
+from cgate.cli._swap_helper import append_log
 from cgate.update import (
     Release,
     UpdateError,
@@ -138,10 +141,34 @@ def apply_cmd(
         )
         return
 
-    # Swap failed. Show diagnostics and offer kill+retry.
+    # Swap failed. Branch based on WHO is blocking:
+    # - Self (we hold the lock on our own executable): spawn helper updater
+    # - Other cgate processes: kill+retry
+    # - Nobody listed: swap failed for some other reason (permissions, AV)
     console.print(f"[red]Could not replace the running binary:[/red] {err}")
-    blockers = find_blocking_processes(binary, exclude_pid=os.getpid())
-    if blockers:
+    blockers = find_blocking_processes(binary)
+    self_pid = os.getpid()
+    if self_pid in blockers:
+        # No other blockers. The only thing holding the binary is us.
+        # On Windows the running process locks its own executable, so an
+        # in-process swap is impossible. Spawn cmd.exe to do the move
+        # after this process exits (cmd.exe is not cgate.exe so it does
+        # not hold the lock). The 4-second ping gives this process
+        # time to fully release the file handle.
+        append_log(
+            f"update apply: direct swap failed ({err}), self-lock detected "
+            f"(PID {self_pid}), spawning cmd.exe for {binary}"
+        )
+        if _spawn_delayed_swap(staging, binary):
+            console.print(
+                f"[green]Update staged.[/green] The move will complete "
+                f"in the background after this process exits. Re-run "
+                f"[bold]cgate --version[/bold] in a few seconds to confirm.\n"
+                f"{rollback_msg}"
+            )
+            return
+        console.print("[red]Could not spawn swap helper.[/red]")
+    elif blockers:
         pid_list = ", ".join(str(pid) for pid in blockers)
         console.print(
             f"[yellow]Active cgate processes blocking the swap:[/yellow] "
@@ -179,3 +206,47 @@ def apply_cmd(
         f"{rollback_msg}"
     )
     raise typer.Exit(code=4)
+
+
+def _spawn_delayed_swap(staging, target) -> bool:
+    """Spawn a detached subprocess that moves ``staging`` to ``target``
+    after the caller has had time to exit.
+
+    Windows: ``cmd.exe /c "ping ... && move"`` because cmd.exe is not
+    cgate.exe and therefore does not hold the file lock. The ``ping``
+    burns ~4 seconds to let the caller fully release its handle on
+    ``target``.
+
+    POSIX: ``mv -f`` via start_new_session, no delay needed since there
+    is no self-lock.
+    """
+    try:
+        if sys.platform == "win32":
+            # cmd.exe is the cleanest available process to do a move on
+            # Windows. ``ping`` with -n 5 sends 4 pings (about 3-4s) and
+            # exits 0; ``&`` chains commands. The quotes around paths
+            # matter because Windows paths with spaces would otherwise
+            # be split.
+            cmd_str = (
+                f'ping -n 5 127.0.0.1 > nul & '
+                f'move /Y "{staging}" "{target}"'
+            )
+            subprocess.Popen(
+                f"cmd.exe /c \"{cmd_str}\"",
+                creationflags=0x00000008,  # DETACHED_PROCESS
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                ["mv", "-f", str(staging), str(target)],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+    except (subprocess.SubprocessError, OSError) as exc:
+        append_log(f"update apply: failed to spawn delayed swap: {exc}")
+        return False
+    return True
