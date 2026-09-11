@@ -42,17 +42,20 @@ def connect(database: Database) -> Generator[sqlite3.Connection, None, None]:
 
 
 def init_database(database: Database) -> None:
-    """Create parent dirs (if needed) and apply the schema; idempotent."""
+    """Create parent dirs (if needed) and apply the schema; idempotent.
+
+    Uses ``INSERT OR IGNORE`` rather than a SELECT-then-INSERT (issue
+    #11): two ``cgate`` processes launched concurrently against a brand
+    new database file could otherwise both pass the SELECT before either
+    committed, then collide on the second's INSERT into the
+    ``version`` PRIMARY KEY. ``OR IGNORE`` makes the row idempotent in a
+    single statement instead.
+    """
     database.path.parent.mkdir(parents=True, exist_ok=True)
     with connect(database) as conn:
         _ = conn.executescript(SCHEMA_SQL)
-        already = conn.execute(
-            "SELECT 1 FROM schema_version WHERE version = ?",
-            (SCHEMA_VERSION,),
-        ).fetchone()
-        if already is None:
-            applied_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-            _ = conn.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, applied_at),
-            )
+        applied_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        _ = conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION, applied_at),
+        )
