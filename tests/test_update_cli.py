@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 _DETACHED_PROCESS = 0x00000008
 _CREATE_NO_WINDOW = 0x08000000
 _BLOCKING_PID = 999
+_MANUAL_RECOVERY_EXIT_CODE = 4
 
 
 def test_spawn_delayed_swap_suppresses_console_window_on_windows(
@@ -102,3 +103,42 @@ def test_apply_force_mcp_skips_the_mcp_specific_confirmation(
 
     assert result.exit_code == 0
     assert "Installed cgate 9.9.9" in result.output
+
+
+def test_apply_cleans_up_previous_snapshot_when_swap_never_happens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """issue #15: no swap ever happened on this path, so the `.previous`
+    snapshot taken from the still-current binary is just disk clutter --
+    unlike `.new`, which the manual-recovery message still points at."""
+    binary = tmp_path / "cgate.exe"
+    binary.write_bytes(b"current binary bytes")
+    monkeypatch.setattr(
+        "cgate.cli.update.fetch_latest_release",
+        lambda: Release(tag="v9.9.9", version="9.9.9", html_url="https://x", assets=()),
+    )
+    monkeypatch.setattr("cgate.cli.update.__version__", "0.0.1")
+    monkeypatch.setattr(
+        "cgate.cli.update.select_asset",
+        lambda _release: Asset("cgate-windows-amd64.exe", "https://x/bin", 1, ""),
+    )
+    monkeypatch.setattr("cgate.cli.update.current_binary_path", lambda: binary)
+    monkeypatch.setattr("cgate.cli.update.download_to", lambda _asset, _dest: None)
+    monkeypatch.setattr("cgate.cli.update.replace_binary", lambda _staging, _target: "locked")
+    monkeypatch.setattr(
+        "cgate.cli.update.find_blocking_processes", lambda _binary: [_BLOCKING_PID]
+    )
+    monkeypatch.setattr("cgate.cli.update.find_mcp_serving_pids", lambda _pids: [])
+
+    result = CliRunner().invoke(app, ["update", "apply"], input="n\n")
+
+    previous = binary.with_name(binary.name + ".previous")
+    staging = binary.with_name(binary.name + ".new")
+    # Rich wraps long lines for the console width, so compare with
+    # newlines collapsed rather than assuming the path prints unbroken.
+    unwrapped_output = result.output.replace("\n", "")
+    assert result.exit_code == _MANUAL_RECOVERY_EXIT_CODE
+    assert not previous.exists()
+    assert "Rollback slot" not in unwrapped_output
+    assert "Staged download" in unwrapped_output
+    assert str(staging) in unwrapped_output

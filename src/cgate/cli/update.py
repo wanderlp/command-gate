@@ -232,9 +232,14 @@ def apply_cmd(
         f"  2. Replace the binary:\n"
         f"     [dim]Move-Item -Force '{staging}' '{binary}'[/dim]\n"
         f"  3. Restart your IA client (Claude Code / opencode / Cursor)\n"
-        f"\nStaged download: [bold]{staging}[/bold]\n"
-        f"{rollback_msg}"
+        f"\nStaged download: [bold]{staging}[/bold]"
     )
+    # The swap never happened on any path that reaches here, so `previous`
+    # is just a redundant copy of the still-current, unreplaced binary --
+    # not a real rollback slot. Clean it up rather than leaving it as
+    # disk clutter (issue #15); `staging` stays, since the message above
+    # points the user at it for the manual move.
+    previous.unlink(missing_ok=True)
     raise typer.Exit(code=4)
 
 
