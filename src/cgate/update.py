@@ -36,6 +36,11 @@ class _ReleasePayload(TypedDict, total=False):
     assets: list[_AssetPayload]
 
 
+class _ProcessInfo(TypedDict):
+    ProcessId: int
+    CommandLine: NotRequired[str | None]
+
+
 @dataclass(frozen=True, slots=True)
 class Asset:
     """A downloadable asset attached to a GitHub Release."""
@@ -255,6 +260,55 @@ def find_blocking_processes(
             continue
         pids.append(pid)
     return pids
+
+
+def find_mcp_serving_pids(pids: list[int]) -> list[int]:
+    """Return which of the given PIDs were launched as ``cgate mcp serve``.
+
+    Distinguishes "another cgate.exe happens to be running" from "a live MCP
+    session an IA client is actively depending on", so callers can warn
+    accordingly before killing it (see issue #19). Windows only; returns an
+    empty list on other platforms, when there is nothing to check, or when
+    the command-line lookup itself fails -- callers then fall back to a
+    generic warning rather than a hard failure. Uses PowerShell's CIM
+    cmdlets rather than the deprecated ``wmic``, which newer Windows builds
+    no longer ship.
+    """
+    if sys.platform != "win32" or not pids:
+        return []
+    try:
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                (
+                    "Get-CimInstance Win32_Process -Filter \"Name='cgate.exe'\" "
+                    "| Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return []
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return []
+    try:
+        payload: _ProcessInfo | list[_ProcessInfo] = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return []
+    rows = [payload] if isinstance(payload, dict) else payload
+    wanted = set(pids)
+    return [
+        row["ProcessId"]
+        for row in rows
+        if row.get("ProcessId") in wanted
+        and (row.get("CommandLine") or "").strip().lower().endswith("mcp serve")
+    ]
 
 
 def kill_process(pid: int) -> bool:

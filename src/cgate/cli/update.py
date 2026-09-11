@@ -22,6 +22,7 @@ from cgate.update import (
     download_to,
     fetch_latest_release,
     find_blocking_processes,
+    find_mcp_serving_pids,
     kill_process,
     replace_binary,
     select_asset,
@@ -72,7 +73,21 @@ def apply_cmd(
             "-f",
             help=(
                 "Auto-kill running cgate processes that block the swap, "
-                "without prompting. Required for fully unattended updates."
+                "without prompting. Does NOT cover a process serving a live "
+                "MCP session -- see --force-mcp. Required for fully "
+                "unattended updates otherwise."
+            ),
+        ),
+    ] = False,
+    force_mcp: Annotated[
+        bool,
+        typer.Option(
+            "--force-mcp",
+            help=(
+                "Also kill a blocking process that is serving a live MCP "
+                "session for an IA client, without prompting. This "
+                "immediately disconnects that client mid-session; only pass "
+                "it when you know nothing is relying on the connection."
             ),
         ),
     ] = False,
@@ -174,9 +189,24 @@ def apply_cmd(
             f"[yellow]Active cgate processes blocking the swap:[/yellow] "
             f"PID(s) {pid_list}"
         )
-        proceed = force or typer.confirm(
-            "Kill blocking processes and retry the swap?", default=False
-        )
+        mcp_pids = find_mcp_serving_pids(blockers)
+        if mcp_pids:
+            mcp_pid_list = ", ".join(str(pid) for pid in mcp_pids)
+            console.print(
+                f"[red]PID(s) {mcp_pid_list} appear to be serving a live MCP "
+                "session for an IA client (Claude Code / opencode / Cursor). "
+                "Killing it disconnects that session immediately: any "
+                "in-flight tool call fails, and cgate cannot reconnect it "
+                "for you -- you will need to restart the IA client "
+                "afterward.[/red]"
+            )
+            proceed = force_mcp or typer.confirm(
+                "Kill the live MCP session and retry the swap?", default=False
+            )
+        else:
+            proceed = force or typer.confirm(
+                "Kill blocking processes and retry the swap?", default=False
+            )
         if proceed:
             killed = [pid for pid in blockers if kill_process(pid)]
             if killed:

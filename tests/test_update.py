@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import sys
 import urllib.error
 from pathlib import Path
@@ -20,6 +21,7 @@ from cgate.update import (
     download_to,
     fetch_latest_release,
     find_blocking_processes,
+    find_mcp_serving_pids,
     kill_process,
     replace_binary,
     select_asset,
@@ -271,6 +273,102 @@ def test_find_blocking_processes_returns_empty_when_tasklist_unavailable(
 
     with patch("subprocess.run", side_effect=FileNotFoundError):
         pids = find_blocking_processes(tmp_path / "cgate.exe")
+
+    assert pids == []
+
+
+def test_find_mcp_serving_pids_filters_by_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    rows = [
+        {"ProcessId": 1234, "CommandLine": "C:\\bin\\cgate.exe mcp serve"},
+        {"ProcessId": 5678, "CommandLine": "C:\\bin\\cgate.exe update apply"},
+        {"ProcessId": 9012, "CommandLine": None},
+    ]
+    completed = MagicMock()
+    completed.stdout = json.dumps(rows)
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([1234, 5678, 9012])
+
+    assert pids == [1234]
+
+
+def test_find_mcp_serving_pids_handles_single_object_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    completed = MagicMock()
+    completed.stdout = json.dumps({"ProcessId": 42, "CommandLine": "cgate.exe mcp serve"})
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([42])
+
+    assert pids == [42]
+
+
+def test_find_mcp_serving_pids_ignores_pids_not_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    completed = MagicMock()
+    completed.stdout = json.dumps({"ProcessId": 42, "CommandLine": "cgate.exe mcp serve"})
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([1234])
+
+    assert pids == []
+
+
+def test_find_mcp_serving_pids_returns_empty_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    with patch("subprocess.run") as run:
+        pids = find_mcp_serving_pids([1234])
+
+    assert pids == []
+    run.assert_not_called()
+
+
+def test_find_mcp_serving_pids_returns_empty_when_no_pids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with patch("subprocess.run") as run:
+        pids = find_mcp_serving_pids([])
+
+    assert pids == []
+    run.assert_not_called()
+
+
+def test_find_mcp_serving_pids_returns_empty_when_powershell_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        pids = find_mcp_serving_pids([1234])
+
+    assert pids == []
+
+
+def test_find_mcp_serving_pids_returns_empty_on_malformed_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    completed = MagicMock()
+    completed.stdout = "not json"
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([1234])
 
     assert pids == []
 
