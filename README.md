@@ -66,15 +66,11 @@ Both are unsigned-binary friction, not bugs. Code signing is on the roadmap
 ```text
 # 1. IA agent calls propose_command via MCP.  Humans never see this step.
 
-# 2. Run the watch TUI.  Approve / reject / bulk-approve per batch.
+# 2. Run the watch dashboard: a full-screen queue + active-batch view.
 $ cgate watch
-[cyan]Restart svc X on srv-prdsvcs[/cyan]
-  ● Get-Service      [WIN] srv-prdsvcs
-  Approve? [y/n/a/r] y
-  ✓ exited 0 in 142ms
-  ● Restart-Service  [WIN] srv-prdsvcs
-  Approve? [y/n/a/r] n
-  ✗ rejected
+# Sidebar shows the FIFO batch queue; the main panel shows the active
+# batch's commands. y=approve  n=reject  a=approve rest  r=reject rest  q=quit.
+# Stays open and keeps polling for new batches even when the queue drains.
 
 # 3. Stay current.
 $ cgate update check
