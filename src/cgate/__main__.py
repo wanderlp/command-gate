@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cgate.cli.main import app
+from cgate.cli.main import main
 
 if __name__ == "__main__":
-    app()
+    main()
