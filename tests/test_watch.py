@@ -198,6 +198,32 @@ def test_approve_one_marks_failed_when_executor_returns_error(repos: Repos) -> N
     assert result is failed
 
 
+def test_approve_one_does_not_execute_when_it_loses_the_race(repos: Repos) -> None:
+    """issue #13: if update_status's CAS guard reports the row already
+    moved on -- a race between the initial PENDING check and the write --
+    approve_one must not call the executor."""
+    _add_connection(repos)
+    cmd = _command(repos)
+
+    with (
+        patch("cgate.watch.approval.execute_command") as execute,
+        patch.object(repos.commands, "update_status", return_value=False) as update_status,
+    ):
+        updated, result = approve_one(
+            db=repos.db,
+            commands=repos.commands,
+            connections=repos.connections,
+            batches=repos.batches,
+            command_id=cmd.id,
+        )
+
+    update_status.assert_called_once()
+    execute.assert_not_called()
+    assert result is None
+    assert updated is not None
+    assert updated.status is CommandStatus.PENDING
+
+
 def test_reject_one_marks_rejected_and_does_not_execute(repos: Repos) -> None:
     cmd = _command(repos)
 
