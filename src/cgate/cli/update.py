@@ -233,7 +233,12 @@ def _spawn_delayed_swap(staging, target) -> bool:
             )
             subprocess.Popen(
                 f"cmd.exe /c \"{cmd_str}\"",
-                creationflags=0x00000008,  # DETACHED_PROCESS
+                # DETACHED_PROCESS | CREATE_NO_WINDOW: detach from our console
+                # AND suppress the new console Windows would otherwise open
+                # for cmd.exe/ping.exe. DETACHED_PROCESS alone still flashes
+                # a visible window since it only stops console inheritance,
+                # not allocation of a fresh one.
+                creationflags=0x00000008 | 0x08000000,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
