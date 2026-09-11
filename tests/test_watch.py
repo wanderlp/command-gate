@@ -5,9 +5,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from typer.testing import CliRunner
 
-from cgate.cli.main import app
 from cgate.connections.store import ConnectionsRepo
 from cgate.db.batches import BatchesRepo
 from cgate.db.commands import CommandsRepo
@@ -21,6 +19,7 @@ from cgate.watch.queue import (
     is_batch_resolved,
     pending_commands_in_batch,
 )
+from cgate.watch.session import run_watch_session
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -312,13 +311,24 @@ def test_batch_resolves_only_after_last_command_is_terminal(repos: Repos) -> Non
     assert repos.batches.get(lot.id).resolved_at is not None
 
 
-def test_cli_watch_prints_no_pending_when_db_empty(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+def test_run_watch_session_always_launches_the_dashboard(
+    repos: Repos, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CGATE_DB_PATH", str(tmp_path / "cgate.db"))
+    """The empty-queue fast exit was removed: `cgate watch` always opens
+    the dashboard now, and WatchApp's own idle state handles a queue with
+    nothing pending yet."""
+    launched: dict[str, object] = {}
 
-    result = CliRunner().invoke(app, ["watch"])
+    class FakeApp:
+        def __init__(self, **kwargs: object) -> None:
+            launched.update(kwargs)
 
-    assert result.exit_code == 0
-    assert "No pending batches" in result.output
+        def run(self) -> None:
+            launched["ran"] = True
+
+    monkeypatch.setattr("cgate.watch.session.WatchApp", FakeApp)
+
+    run_watch_session(repos.db)
+
+    assert launched["ran"] is True
+    assert launched["db"] is repos.db
