@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from packaging.version import InvalidVersion, Version
@@ -16,6 +17,18 @@ from typing import Final, NotRequired, TypedDict
 
 DEFAULT_REPO: Final = "wanderlp/command-gate"
 GITHUB_API: Final = "https://api.github.com"
+# Defense in depth (issue #14): the release payload's browser_download_url
+# comes from the same trust boundary as the sha256 digest we check it
+# against (see issue #4), so this doesn't stop a compromised API response
+# on its own -- but it stops a URL field pointed somewhere unexpected
+# without also compromising these hosts.
+_ALLOWED_DOWNLOAD_HOSTS: Final = frozenset(
+    {
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+)
 # Body read has no separate timeout; this only caps the connect/handshake.
 # A 29 MB download on a 1 Mbps link takes ~230s; rely on TCP keepalive for
 # stalled-transfer detection rather than a per-call wall clock.
@@ -160,6 +173,14 @@ def compare_versions(current: str, latest: str) -> int:
     return 0
 
 
+def _ensure_allowed_download_host(url: str) -> None:
+    """Refuse to fetch a release asset from an unexpected host (issue #14)."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
+        msg = f"refusing to download from untrusted host: {url}"
+        raise UpdateError(msg)
+
+
 def download_to(asset: Asset, dest: Path) -> None:
     """Stream an asset to a file and verify size + sha256 before committing.
 
@@ -169,6 +190,7 @@ def download_to(asset: Asset, dest: Path) -> None:
     mirror mismatch, MITM) leaves the part file unlinked and raises
     ``UpdateError`` instead of installing a half-downloaded binary.
     """
+    _ensure_allowed_download_host(asset.download_url)
     dest.parent.mkdir(parents=True, exist_ok=True)
     temporary = dest.with_suffix(dest.suffix + ".part")
     sha256 = hashlib.sha256()

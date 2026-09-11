@@ -40,7 +40,7 @@ def test_parse_release_extracts_assets_and_version() -> None:
             "assets": [
                 {
                     "name": "cgate-linux-x86_64",
-                    "browser_download_url": "https://example.test/binary",
+                    "browser_download_url": "https://github.com/binary",
                     "size": 42,
                     "digest": _sha256_digest(b"placeholder"),
                 }
@@ -52,7 +52,7 @@ def test_parse_release_extracts_assets_and_version() -> None:
     assert release.assets == (
         Asset(
             "cgate-linux-x86_64",
-            "https://example.test/binary",
+            "https://github.com/binary",
             42,
             _sha256_digest(b"placeholder"),
         ),
@@ -130,12 +130,39 @@ def test_current_binary_path_returns_path_when_running_frozen(
     assert current_binary_path() == executable.resolve()
 
 
+def test_download_to_refuses_untrusted_host(tmp_path: Path) -> None:
+    """issue #14: an asset URL pointed off the allow-list must never be fetched."""
+    asset = Asset("cgate-linux-x86_64", "https://evil.example/binary", 1, "")
+    destination = tmp_path / "cgate"
+
+    with (
+        patch("urllib.request.urlopen") as urlopen,
+        pytest.raises(UpdateError, match="untrusted host"),
+    ):
+        download_to(asset, destination)
+
+    urlopen.assert_not_called()
+    assert not destination.exists()
+
+
+def test_download_to_refuses_non_https_scheme(tmp_path: Path) -> None:
+    asset = Asset("cgate-linux-x86_64", "http://github.com/binary", 1, "")
+
+    with (
+        patch("urllib.request.urlopen") as urlopen,
+        pytest.raises(UpdateError, match="untrusted host"),
+    ):
+        download_to(asset, tmp_path / "cgate")
+
+    urlopen.assert_not_called()
+
+
 def test_download_to_streams_to_temp_and_replaces(tmp_path: Path) -> None:
     payload = b"new binary contents"
     response = MagicMock()
     response.__enter__.return_value = io.BytesIO(payload)
     # No digest -> verification is skipped, so this stays simple.
-    asset = Asset("cgate-linux-x86_64", "https://example.test/binary", len(payload), "")
+    asset = Asset("cgate-linux-x86_64", "https://github.com/binary", len(payload), "")
     destination = tmp_path / "cgate"
 
     with patch("urllib.request.urlopen", return_value=response):
@@ -150,7 +177,7 @@ def test_download_to_raises_when_size_mismatches(tmp_path: Path) -> None:
     response = MagicMock()
     response.__enter__.return_value = io.BytesIO(payload)
     # Advertise 99 bytes -- mismatch must abort before swap.
-    asset = Asset("cgate-linux-x86_64", "https://example.test/binary", 99, "")
+    asset = Asset("cgate-linux-x86_64", "https://github.com/binary", 99, "")
     destination = tmp_path / "cgate"
 
     with (
@@ -170,7 +197,7 @@ def test_download_to_raises_when_sha256_mismatches(tmp_path: Path) -> None:
     wrong_digest = "sha256:" + ("0" * 64)
     asset = Asset(
         "cgate-linux-x86_64",
-        "https://example.test/binary",
+        "https://github.com/binary",
         len(payload),
         wrong_digest,
     )
@@ -192,7 +219,7 @@ def test_download_to_succeeds_when_sha256_matches(tmp_path: Path) -> None:
     response.__enter__.return_value = io.BytesIO(payload)
     asset = Asset(
         "cgate-linux-x86_64",
-        "https://example.test/binary",
+        "https://github.com/binary",
         len(payload),
         _sha256_digest(payload),
     )
