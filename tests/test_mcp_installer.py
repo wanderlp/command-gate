@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from cgate.cli.main import app
 from cgate.mcp_installer import (
+    CLIENTS,
     ClientInstall,
     current_binary_command,
     detect_clients,
@@ -55,9 +56,9 @@ def test_detect_clients_finds_claude_via_settings_json(
 def test_detect_clients_prefers_first_path_when_multiple_exist(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When BOTH Claude Code paths exist, the first one in
-    CONFIG_FILENAMES wins so register/unregister write back to the same
-    file that was detected."""
+    """When BOTH Claude Code paths exist, the first one listed in
+    CLIENTS wins so register/unregister write back to the same file
+    that was detected."""
     primary = tmp_path / ".claude.json"
     secondary = tmp_path / ".claude" / "settings.json"
     secondary.parent.mkdir(parents=True)
@@ -148,6 +149,23 @@ def test_is_registered_true_when_present(tmp_path: Path) -> None:
     )
 
     assert is_registered(_client(config)) is True
+
+
+@pytest.mark.parametrize("name", list(CLIENTS))
+def test_register_and_unregister_roundtrip_for_every_supported_client(
+    name: str, tmp_path: Path
+) -> None:
+    """issue #18: every entry in CLIENTS must work end-to-end on its own --
+    a client added there with an incomplete/wrong spec should fail here,
+    not as a distant KeyError."""
+    spec = CLIENTS[name]
+    client = ClientInstall(name=name, label=spec.label, config_path=tmp_path / "config.json")
+
+    register(client, "cgate", ["mcp", "serve"])
+    assert is_registered(client) is True
+
+    assert unregister(client) is True
+    assert is_registered(client) is False
 
 
 def test_current_binary_command_returns_exe_path_when_frozen(
