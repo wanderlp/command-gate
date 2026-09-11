@@ -69,18 +69,23 @@ def approve_one(  # noqa: PLR0913 - signature follows the required repository DI
         raise ConnectionNotFoundError(command.server_alias)
 
     approver = _approve_by()
-    commands.update_status(
+    approved = commands.update_status(
         command_id,
         status=CommandStatus.APPROVED,
         approved_by=approver,
+        expected_status=CommandStatus.PENDING,
     )
+    if not approved:
+        # Lost a race with another decision on this command since the
+        # PENDING check above -- report its current state, don't execute.
+        return commands.get(command_id), None
     result = execute_command(connection, command.command, timeout=timeout)
     status = CommandStatus.EXECUTED if result.ok else CommandStatus.FAILED
     output = result.stdout
     if result.stderr:
         separator = "\n" if output else ""
         output = f"{output}{separator}--- stderr ---\n{result.stderr}"
-    commands.update_status(
+    _ = commands.update_status(
         command_id,
         status=status,
         approved_by=approver,
@@ -100,10 +105,11 @@ def reject_one(
     command_id: CommandId,
 ) -> Command:
     """Reject one command and resolve its batch when it becomes terminal."""
-    commands.update_status(
+    _ = commands.update_status(
         command_id,
         status=CommandStatus.REJECTED,
         approved_by=_approve_by(),
+        expected_status=CommandStatus.PENDING,
     )
     updated = commands.get(command_id)
     if updated is None:
@@ -136,7 +142,7 @@ def approve_remaining(  # noqa: PLR0913 - signature follows the required reposit
                 timeout=timeout,
             )
         except Exception as exc:
-            commands.update_status(
+            _ = commands.update_status(
                 command.id,
                 status=CommandStatus.FAILED,
                 approved_by=_approve_by(),

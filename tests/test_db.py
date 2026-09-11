@@ -254,6 +254,62 @@ def test_update_status_approved_does_not_set_resolved_at(tmp_path: Path) -> None
     assert fetched.resolved_at is None
 
 
+def test_update_status_expected_status_guard_blocks_stale_transition(
+    tmp_path: Path,
+) -> None:
+    """issue #13: a CAS guard must refuse to apply when the row has already
+    moved on, and report that nothing changed."""
+    db = _db(tmp_path)
+    batches = BatchesRepo(db)
+    commands = CommandsRepo(db)
+    batch = batches.create(title="b", description=None, requested_by_agent=None)
+    cmd = commands.add(
+        batch_id=batch.id,
+        server_alias="srv-1",
+        server_type=ServerType.LINUX,
+        command="true",
+    )
+    # Someone else already rejected it.
+    _ = commands.update_status(cmd.id, status=CommandStatus.REJECTED)
+
+    applied = commands.update_status(
+        cmd.id,
+        status=CommandStatus.APPROVED,
+        expected_status=CommandStatus.PENDING,
+    )
+
+    assert applied is False
+    fetched = commands.get(cmd.id)
+    assert fetched is not None
+    assert fetched.status == CommandStatus.REJECTED
+
+
+def test_update_status_expected_status_guard_allows_matching_transition(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    batches = BatchesRepo(db)
+    commands = CommandsRepo(db)
+    batch = batches.create(title="b", description=None, requested_by_agent=None)
+    cmd = commands.add(
+        batch_id=batch.id,
+        server_alias="srv-1",
+        server_type=ServerType.LINUX,
+        command="true",
+    )
+
+    applied = commands.update_status(
+        cmd.id,
+        status=CommandStatus.APPROVED,
+        expected_status=CommandStatus.PENDING,
+    )
+
+    assert applied is True
+    fetched = commands.get(cmd.id)
+    assert fetched is not None
+    assert fetched.status == CommandStatus.APPROVED
+
+
 def test_check_constraint_rejects_unknown_status(tmp_path: Path) -> None:
     db = _db(tmp_path)
     # Setup: parent batch must exist for the FK.

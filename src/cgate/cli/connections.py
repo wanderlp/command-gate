@@ -20,7 +20,7 @@ from cgate.connections.detect import (
     probe_host,
 )
 from cgate.connections.store import ConnectionsRepo
-from cgate.core.paths import data_dir
+from cgate.core.paths import db_path
 from cgate.db.connection import Database, init_database
 from cgate.db.types import ServerType
 
@@ -30,7 +30,7 @@ console = Console()
 
 def _db() -> Database:
     """Open the local SQLite database and create its schema when absent."""
-    db = Database(path=data_dir() / "cgate.db")
+    db = Database(path=db_path())
     init_database(db)
     return db
 
@@ -151,9 +151,30 @@ def remove(alias: str) -> None:
     """Remove a connection and its credential from the OS keyring."""
     if not typer.confirm(f"Remove connection '{alias}'?"):
         raise typer.Abort
-    removed = ConnectionsRepo(_db()).remove(alias)
+    repo = ConnectionsRepo(_db())
+    if repo.get(alias) is None:
+        console.print(f"[red]No connection '{alias}' found.[/red]")
+        raise typer.Exit(code=1)
+
+    # Remove the keyring credential BEFORE the DB row (issue #5). If the
+    # keyring backend is unavailable -- common on headless Linux, and not
+    # every backend failure is a keyring.errors.KeyringError subclass --
+    # aborting here leaves the connection intact and reusable instead of
+    # deleting the DB row and orphaning a credential no connection can
+    # ever reference again.
+    try:
+        _ = remove_credential(alias)
+    except Exception as exc:
+        console.print(
+            f"[red]Could not remove the stored credential for '{alias}' from "
+            f"the OS keyring:[/red] {exc}\n"
+            "[dim]The connection was NOT removed. Fix the keyring backend and "
+            "retry, or remove the credential manually first.[/dim]"
+        )
+        raise typer.Exit(code=1) from exc
+
+    removed = repo.remove(alias)
     if not removed:
         console.print(f"[red]No connection '{alias}' found.[/red]")
         raise typer.Exit(code=1)
-    _ = remove_credential(alias)
     console.print(f"Removed [bold]{alias}[/bold].")

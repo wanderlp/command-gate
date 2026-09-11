@@ -11,7 +11,7 @@ from rich.rule import Rule
 from rich.table import Table
 
 from cgate.mcp_installer import (
-    CONFIG_FILENAMES,
+    CLIENTS,
     current_binary_command,
     detect_clients,
     is_registered,
@@ -70,7 +70,8 @@ def install_cmd(
     if not clients:
         console.print("[yellow]No IA clients detected.[/yellow]")
         console.print("Expected config paths under your home:")
-        for relative in CONFIG_FILENAMES.values():
+        all_paths = (path for spec in CLIENTS.values() for path in spec.config_paths)
+        for relative in all_paths:
             console.print(f"  - [dim]~/{relative}[/dim]")
         return
 

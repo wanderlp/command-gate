@@ -22,6 +22,7 @@ from cgate.update import (
     download_to,
     fetch_latest_release,
     find_blocking_processes,
+    find_mcp_serving_pids,
     kill_process,
     replace_binary,
     select_asset,
@@ -72,7 +73,21 @@ def apply_cmd(
             "-f",
             help=(
                 "Auto-kill running cgate processes that block the swap, "
-                "without prompting. Required for fully unattended updates."
+                "without prompting. Does NOT cover a process serving a live "
+                "MCP session -- see --force-mcp. Required for fully "
+                "unattended updates otherwise."
+            ),
+        ),
+    ] = False,
+    force_mcp: Annotated[
+        bool,
+        typer.Option(
+            "--force-mcp",
+            help=(
+                "Also kill a blocking process that is serving a live MCP "
+                "session for an IA client, without prompting. This "
+                "immediately disconnects that client mid-session; only pass "
+                "it when you know nothing is relying on the connection."
             ),
         ),
     ] = False,
@@ -174,9 +189,24 @@ def apply_cmd(
             f"[yellow]Active cgate processes blocking the swap:[/yellow] "
             f"PID(s) {pid_list}"
         )
-        proceed = force or typer.confirm(
-            "Kill blocking processes and retry the swap?", default=False
-        )
+        mcp_pids = find_mcp_serving_pids(blockers)
+        if mcp_pids:
+            mcp_pid_list = ", ".join(str(pid) for pid in mcp_pids)
+            console.print(
+                f"[red]PID(s) {mcp_pid_list} appear to be serving a live MCP "
+                "session for an IA client (Claude Code / opencode / Cursor). "
+                "Killing it disconnects that session immediately: any "
+                "in-flight tool call fails, and cgate cannot reconnect it "
+                "for you -- you will need to restart the IA client "
+                "afterward.[/red]"
+            )
+            proceed = force_mcp or typer.confirm(
+                "Kill the live MCP session and retry the swap?", default=False
+            )
+        else:
+            proceed = force or typer.confirm(
+                "Kill blocking processes and retry the swap?", default=False
+            )
         if proceed:
             killed = [pid for pid in blockers if kill_process(pid)]
             if killed:
@@ -202,9 +232,14 @@ def apply_cmd(
         f"  2. Replace the binary:\n"
         f"     [dim]Move-Item -Force '{staging}' '{binary}'[/dim]\n"
         f"  3. Restart your IA client (Claude Code / opencode / Cursor)\n"
-        f"\nStaged download: [bold]{staging}[/bold]\n"
-        f"{rollback_msg}"
+        f"\nStaged download: [bold]{staging}[/bold]"
     )
+    # The swap never happened on any path that reaches here, so `previous`
+    # is just a redundant copy of the still-current, unreplaced binary --
+    # not a real rollback slot. Clean it up rather than leaving it as
+    # disk clutter (issue #15); `staging` stays, since the message above
+    # points the user at it for the manual move.
+    previous.unlink(missing_ok=True)
     raise typer.Exit(code=4)
 
 
@@ -233,7 +268,12 @@ def _spawn_delayed_swap(staging, target) -> bool:
             )
             subprocess.Popen(
                 f"cmd.exe /c \"{cmd_str}\"",
-                creationflags=0x00000008,  # DETACHED_PROCESS
+                # DETACHED_PROCESS | CREATE_NO_WINDOW: detach from our console
+                # AND suppress the new console Windows would otherwise open
+                # for cmd.exe/ping.exe. DETACHED_PROCESS alone still flashes
+                # a visible window since it only stops console inheritance,
+                # not allocation of a fresh one.
+                creationflags=0x00000008 | 0x08000000,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,

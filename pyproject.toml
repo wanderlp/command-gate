@@ -16,13 +16,15 @@ dependencies = [
     "paramiko>=3.0",
     "pydantic>=2.7",
     "pywinrm>=0.4",
+    "requests>=2.31",
     "rich>=13.0",
     "textual>=8.2.8",
     "typer>=0.12",
+    "typing-extensions>=4.12",
 ]
 
 [project.scripts]
-cgate = "cgate.cli.main:app"
+cgate = "cgate.cli.main:main"
 
 [project.optional-dependencies]
 dev = [

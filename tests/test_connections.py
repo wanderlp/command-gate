@@ -202,7 +202,6 @@ def test_cli_list_on_empty_database(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("CGATE_DB_PATH", str(tmp_path / "cgate.db"))
-    monkeypatch.setattr("cgate.cli.connections.data_dir", lambda: tmp_path)
     result = CliRunner().invoke(app, ["connections", "list"])
     assert result.exit_code == 0
     assert "No connections" in result.output

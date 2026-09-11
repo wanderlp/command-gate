@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
 
 from cgate.cli.main import app
 from cgate.mcp_installer import (
+    CLIENTS,
     ClientInstall,
     current_binary_command,
     detect_clients,
@@ -55,9 +57,9 @@ def test_detect_clients_finds_claude_via_settings_json(
 def test_detect_clients_prefers_first_path_when_multiple_exist(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When BOTH Claude Code paths exist, the first one in
-    CONFIG_FILENAMES wins so register/unregister write back to the same
-    file that was detected."""
+    """When BOTH Claude Code paths exist, the first one listed in
+    CLIENTS wins so register/unregister write back to the same file
+    that was detected."""
     primary = tmp_path / ".claude.json"
     secondary = tmp_path / ".claude" / "settings.json"
     secondary.parent.mkdir(parents=True)
@@ -96,6 +98,23 @@ def test_write_json_atomic_creates_backup_file(tmp_path: Path) -> None:
     assert config.with_suffix(".json.bak").read_text(encoding="utf-8") == (
         '{"before": true}\n'
     )
+
+
+def test_write_json_atomic_reraises_oserror_from_failed_backup(tmp_path: Path) -> None:
+    """issue #17: a failing backup copy must be caught by the same guard as
+    the write itself, not raise uncaught, and must not leave a stray .tmp
+    file or a partially-overwritten target behind."""
+    config = tmp_path / "mcp.json"
+    config.write_text('{"before": true}', encoding="utf-8")
+
+    with (
+        patch("shutil.copyfile", side_effect=OSError("read-only filesystem")),
+        pytest.raises(OSError, match="read-only filesystem"),
+    ):
+        write_json_atomic(config, {"after": True})
+
+    assert config.read_text(encoding="utf-8") == '{"before": true}'
+    assert not config.with_suffix(".json.tmp").exists()
 
 
 def test_register_adds_cgate_to_existing_claude_config(tmp_path: Path) -> None:
@@ -148,6 +167,23 @@ def test_is_registered_true_when_present(tmp_path: Path) -> None:
     )
 
     assert is_registered(_client(config)) is True
+
+
+@pytest.mark.parametrize("name", list(CLIENTS))
+def test_register_and_unregister_roundtrip_for_every_supported_client(
+    name: str, tmp_path: Path
+) -> None:
+    """issue #18: every entry in CLIENTS must work end-to-end on its own --
+    a client added there with an incomplete/wrong spec should fail here,
+    not as a distant KeyError."""
+    spec = CLIENTS[name]
+    client = ClientInstall(name=name, label=spec.label, config_path=tmp_path / "config.json")
+
+    register(client, "cgate", ["mcp", "serve"])
+    assert is_registered(client) is True
+
+    assert unregister(client) is True
+    assert is_registered(client) is False
 
 
 def test_current_binary_command_returns_exe_path_when_frozen(

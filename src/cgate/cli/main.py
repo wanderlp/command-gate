@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Annotated
 
 import typer
+from rich.console import Console
 
 from cgate import __version__
 from cgate.cli.connections import connections_app
@@ -49,5 +51,27 @@ def root(
     """Display help or route to a command group."""
 
 
+def main() -> None:
+    """Run the CLI, turning an uncaught sqlite3.Error into a clean exit.
+
+    Every command opens its own SQLite connection with no shared boundary
+    that catches DB failures; a locked database (another cgate process
+    holding it) or a corrupted file otherwise surfaces as a raw traceback
+    from deep inside whichever command hit it first, instead of a clear
+    message (issue #12). This is the entry point PyInstaller's bundled
+    binary and the pip console-script both call, so it covers every
+    command without needing its own try/except.
+    """
+    try:
+        app()
+    except sqlite3.Error as exc:
+        Console(stderr=True).print(
+            f"[red]cgate's local database is locked or corrupted:[/red] {exc}\n"
+            "[dim]Another cgate process may be holding it, or the file may "
+            "be damaged.[/dim]"
+        )
+        raise SystemExit(1) from exc
+
+
 if __name__ == "__main__":
-    app()
+    main()

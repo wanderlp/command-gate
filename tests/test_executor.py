@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import paramiko
+import pytest
+import requests.exceptions
 
 from cgate.connections.auth import StoredCredential
 from cgate.db.types import Connection, ServerType
 from cgate.executor.base import ErrorKind, ExecutionResult
 from cgate.executor.selector import execute_command
-from cgate.executor.ssh import execute_linux
+from cgate.executor.ssh import _TrustOnFirstUsePolicy, execute_linux
 from cgate.executor.winrm import execute_windows
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _credential(*, has_password: bool = True, ssh_key: str | None = None) -> StoredCredential:
@@ -64,6 +70,7 @@ def test_execute_windows_happy_path_returns_zero_exit_code() -> None:
         "https://10.0.0.1:5986/wsman",
         auth=("operator", "8"),
         transport="ntlm",
+        server_cert_validation="validate",
         # pywinrm requires read_timeout_sec > operation_timeout_sec;
         # cgate passes timeout + 30. See test below for the regression.
         operation_timeout_sec=30.0,
@@ -153,6 +160,79 @@ def test_execute_linux_missing_credential_both_password_and_key_returns_auth_fai
     assert result.error_kind is ErrorKind.AUTH_FAILED
     client_factory.return_value.connect.assert_not_called()
     client_factory.return_value.close.assert_called_once_with()
+
+
+def test_trust_on_first_use_policy_persists_new_host_key(tmp_path: Path) -> None:
+    """issue #6: a host seen for the first time must be pinned to disk."""
+    known_hosts_path = tmp_path / "known_hosts"
+    client = paramiko.SSHClient()
+    key = paramiko.ECDSAKey.generate()
+
+    _TrustOnFirstUsePolicy(known_hosts_path).missing_host_key(
+        client, "new-host.example", key
+    )
+
+    assert known_hosts_path.exists()
+    reloaded = paramiko.SSHClient()
+    reloaded.load_host_keys(str(known_hosts_path))
+    assert reloaded.get_host_keys().lookup("new-host.example") is not None
+
+
+def test_execute_linux_loads_known_hosts_when_present(tmp_path: Path) -> None:
+    """A previously-pinned host key must be loaded before connecting."""
+    known_hosts_path = tmp_path / "known_hosts"
+    known_hosts_path.write_text("", encoding="utf-8")
+    client_factory = MagicMock()
+    stdout, stderr = MagicMock(), MagicMock()
+    stdout.read.return_value = b""
+    stderr.read.return_value = b""
+    stdout.channel.recv_exit_status.return_value = 0
+    client_factory.return_value.exec_command.return_value = (MagicMock(), stdout, stderr)
+
+    with (
+        patch("cgate.executor.ssh.paramiko.SSHClient", client_factory),
+        patch("cgate.executor.ssh.data_dir", return_value=tmp_path),
+    ):
+        _ = execute_linux("linux.example", "true", _credential())
+
+    client_factory.return_value.load_host_keys.assert_called_once_with(str(known_hosts_path))
+    client_factory.return_value.set_missing_host_key_policy.assert_called_once()
+
+
+def test_execute_linux_skips_loading_known_hosts_when_absent(tmp_path: Path) -> None:
+    client_factory = MagicMock()
+    stdout, stderr = MagicMock(), MagicMock()
+    stdout.read.return_value = b""
+    stderr.read.return_value = b""
+    stdout.channel.recv_exit_status.return_value = 0
+    client_factory.return_value.exec_command.return_value = (MagicMock(), stdout, stderr)
+
+    with (
+        patch("cgate.executor.ssh.paramiko.SSHClient", client_factory),
+        patch("cgate.executor.ssh.data_dir", return_value=tmp_path),
+    ):
+        _ = execute_linux("linux.example", "true", _credential())
+
+    client_factory.return_value.load_host_keys.assert_not_called()
+
+
+def test_execute_linux_reports_host_key_mismatch(tmp_path: Path) -> None:
+    """A host key that changed since it was pinned must fail, not connect."""
+    client_factory = MagicMock()
+    got_key = paramiko.ECDSAKey.generate()
+    expected_key = paramiko.ECDSAKey.generate()
+    client_factory.return_value.connect.side_effect = paramiko.BadHostKeyException(
+        "linux.example", got_key, expected_key
+    )
+
+    with (
+        patch("cgate.executor.ssh.paramiko.SSHClient", client_factory),
+        patch("cgate.executor.ssh.data_dir", return_value=tmp_path),
+    ):
+        result = execute_linux("linux.example", "id", _credential())
+
+    assert result.ok is False
+    assert "linux.example" in result.stderr
 
 
 def test_execute_command_picks_windows_for_windows_type() -> None:
@@ -289,6 +369,27 @@ def test_execute_windows_falls_back_to_https_when_http_unreachable() -> None:
         "http://https-host.example:5985/wsman",
         "https://https-host.example:5986/wsman",
     ]
+
+
+def test_execute_windows_does_not_fall_back_to_http_on_cert_error() -> None:
+    """issue #7: a cert that fails validation means something IS listening
+    with an untrusted cert -- unlike a refused connection, this must not
+    silently retry over plaintext HTTP (a MITM downgrade)."""
+    session_factory = MagicMock()
+
+    def make_session(endpoint, **kwargs):
+        if endpoint.startswith("https://"):
+            raise requests.exceptions.SSLError("certificate verify failed")
+        pytest.fail("must not retry over HTTP after an HTTPS certificate error")
+
+    session_factory.side_effect = make_session
+
+    with patch("cgate.executor.winrm.winrm.Session", session_factory):
+        result = execute_windows("mitm.example", "Get-Service", _credential())
+
+    assert result.ok is False
+    assert session_factory.call_count == 1
+    assert "certificate verify failed" in result.stderr
 
 
 def test_execute_windows_uses_powershell_not_cmd() -> None:

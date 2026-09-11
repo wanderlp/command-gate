@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import sys
 import urllib.error
 from pathlib import Path
@@ -20,6 +21,7 @@ from cgate.update import (
     download_to,
     fetch_latest_release,
     find_blocking_processes,
+    find_mcp_serving_pids,
     kill_process,
     replace_binary,
     select_asset,
@@ -38,7 +40,7 @@ def test_parse_release_extracts_assets_and_version() -> None:
             "assets": [
                 {
                     "name": "cgate-linux-x86_64",
-                    "browser_download_url": "https://example.test/binary",
+                    "browser_download_url": "https://github.com/binary",
                     "size": 42,
                     "digest": _sha256_digest(b"placeholder"),
                 }
@@ -50,7 +52,7 @@ def test_parse_release_extracts_assets_and_version() -> None:
     assert release.assets == (
         Asset(
             "cgate-linux-x86_64",
-            "https://example.test/binary",
+            "https://github.com/binary",
             42,
             _sha256_digest(b"placeholder"),
         ),
@@ -128,12 +130,39 @@ def test_current_binary_path_returns_path_when_running_frozen(
     assert current_binary_path() == executable.resolve()
 
 
+def test_download_to_refuses_untrusted_host(tmp_path: Path) -> None:
+    """issue #14: an asset URL pointed off the allow-list must never be fetched."""
+    asset = Asset("cgate-linux-x86_64", "https://evil.example/binary", 1, "")
+    destination = tmp_path / "cgate"
+
+    with (
+        patch("urllib.request.urlopen") as urlopen,
+        pytest.raises(UpdateError, match="untrusted host"),
+    ):
+        download_to(asset, destination)
+
+    urlopen.assert_not_called()
+    assert not destination.exists()
+
+
+def test_download_to_refuses_non_https_scheme(tmp_path: Path) -> None:
+    asset = Asset("cgate-linux-x86_64", "http://github.com/binary", 1, "")
+
+    with (
+        patch("urllib.request.urlopen") as urlopen,
+        pytest.raises(UpdateError, match="untrusted host"),
+    ):
+        download_to(asset, tmp_path / "cgate")
+
+    urlopen.assert_not_called()
+
+
 def test_download_to_streams_to_temp_and_replaces(tmp_path: Path) -> None:
     payload = b"new binary contents"
     response = MagicMock()
     response.__enter__.return_value = io.BytesIO(payload)
     # No digest -> verification is skipped, so this stays simple.
-    asset = Asset("cgate-linux-x86_64", "https://example.test/binary", len(payload), "")
+    asset = Asset("cgate-linux-x86_64", "https://github.com/binary", len(payload), "")
     destination = tmp_path / "cgate"
 
     with patch("urllib.request.urlopen", return_value=response):
@@ -148,7 +177,7 @@ def test_download_to_raises_when_size_mismatches(tmp_path: Path) -> None:
     response = MagicMock()
     response.__enter__.return_value = io.BytesIO(payload)
     # Advertise 99 bytes -- mismatch must abort before swap.
-    asset = Asset("cgate-linux-x86_64", "https://example.test/binary", 99, "")
+    asset = Asset("cgate-linux-x86_64", "https://github.com/binary", 99, "")
     destination = tmp_path / "cgate"
 
     with (
@@ -168,7 +197,7 @@ def test_download_to_raises_when_sha256_mismatches(tmp_path: Path) -> None:
     wrong_digest = "sha256:" + ("0" * 64)
     asset = Asset(
         "cgate-linux-x86_64",
-        "https://example.test/binary",
+        "https://github.com/binary",
         len(payload),
         wrong_digest,
     )
@@ -190,7 +219,7 @@ def test_download_to_succeeds_when_sha256_matches(tmp_path: Path) -> None:
     response.__enter__.return_value = io.BytesIO(payload)
     asset = Asset(
         "cgate-linux-x86_64",
-        "https://example.test/binary",
+        "https://github.com/binary",
         len(payload),
         _sha256_digest(payload),
     )
@@ -271,6 +300,102 @@ def test_find_blocking_processes_returns_empty_when_tasklist_unavailable(
 
     with patch("subprocess.run", side_effect=FileNotFoundError):
         pids = find_blocking_processes(tmp_path / "cgate.exe")
+
+    assert pids == []
+
+
+def test_find_mcp_serving_pids_filters_by_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    rows = [
+        {"ProcessId": 1234, "CommandLine": "C:\\bin\\cgate.exe mcp serve"},
+        {"ProcessId": 5678, "CommandLine": "C:\\bin\\cgate.exe update apply"},
+        {"ProcessId": 9012, "CommandLine": None},
+    ]
+    completed = MagicMock()
+    completed.stdout = json.dumps(rows)
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([1234, 5678, 9012])
+
+    assert pids == [1234]
+
+
+def test_find_mcp_serving_pids_handles_single_object_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    completed = MagicMock()
+    completed.stdout = json.dumps({"ProcessId": 42, "CommandLine": "cgate.exe mcp serve"})
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([42])
+
+    assert pids == [42]
+
+
+def test_find_mcp_serving_pids_ignores_pids_not_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    completed = MagicMock()
+    completed.stdout = json.dumps({"ProcessId": 42, "CommandLine": "cgate.exe mcp serve"})
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([1234])
+
+    assert pids == []
+
+
+def test_find_mcp_serving_pids_returns_empty_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    with patch("subprocess.run") as run:
+        pids = find_mcp_serving_pids([1234])
+
+    assert pids == []
+    run.assert_not_called()
+
+
+def test_find_mcp_serving_pids_returns_empty_when_no_pids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with patch("subprocess.run") as run:
+        pids = find_mcp_serving_pids([])
+
+    assert pids == []
+    run.assert_not_called()
+
+
+def test_find_mcp_serving_pids_returns_empty_when_powershell_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        pids = find_mcp_serving_pids([1234])
+
+    assert pids == []
+
+
+def test_find_mcp_serving_pids_returns_empty_on_malformed_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    completed = MagicMock()
+    completed.stdout = "not json"
+    completed.returncode = 0
+
+    with patch("subprocess.run", return_value=completed):
+        pids = find_mcp_serving_pids([1234])
 
     assert pids == []
 
