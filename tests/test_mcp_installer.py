@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -97,6 +98,23 @@ def test_write_json_atomic_creates_backup_file(tmp_path: Path) -> None:
     assert config.with_suffix(".json.bak").read_text(encoding="utf-8") == (
         '{"before": true}\n'
     )
+
+
+def test_write_json_atomic_reraises_oserror_from_failed_backup(tmp_path: Path) -> None:
+    """issue #17: a failing backup copy must be caught by the same guard as
+    the write itself, not raise uncaught, and must not leave a stray .tmp
+    file or a partially-overwritten target behind."""
+    config = tmp_path / "mcp.json"
+    config.write_text('{"before": true}', encoding="utf-8")
+
+    with (
+        patch("shutil.copyfile", side_effect=OSError("read-only filesystem")),
+        pytest.raises(OSError, match="read-only filesystem"),
+    ):
+        write_json_atomic(config, {"after": True})
+
+    assert config.read_text(encoding="utf-8") == '{"before": true}'
+    assert not config.with_suffix(".json.tmp").exists()
 
 
 def test_register_adds_cgate_to_existing_claude_config(tmp_path: Path) -> None:

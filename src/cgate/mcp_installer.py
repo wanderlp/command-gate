@@ -101,10 +101,10 @@ def read_json(path: Path) -> JsonObject:
 def write_json_atomic(path: Path, data: JsonObject) -> None:
     """Back up a config, then durably write and atomically replace it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        _ = shutil.copyfile(path, path.with_suffix(path.suffix + ".bak"))
     temporary = path.with_suffix(path.suffix + ".tmp")
     try:
+        if path.exists():
+            _ = shutil.copyfile(path, path.with_suffix(path.suffix + ".bak"))
         with temporary.open("w", encoding="utf-8") as stream:
             json.dump(data, stream, indent=2)
             _ = stream.write("\n")
