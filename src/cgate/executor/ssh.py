@@ -7,13 +7,51 @@ from typing import TYPE_CHECKING, Final
 
 import paramiko
 from paramiko.ssh_exception import NoValidConnectionsError
+from typing_extensions import override
 
+from cgate.core.paths import data_dir
 from cgate.executor.base import DEFAULT_TIMEOUT_SECONDS, ErrorKind, ExecutionResult
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cgate.connections.auth import StoredCredential
 
 SSH_PORT: Final = 22
+
+
+class _TrustOnFirstUsePolicy(paramiko.MissingHostKeyPolicy):
+    """Accept an unknown host key once, then pin it to ``known_hosts_path``.
+
+    Unlike ``AutoAddPolicy`` (issue #6), which trusts every connection with
+    no memory at all, paramiko only calls ``missing_host_key`` when the
+    hostname isn't already present in the client's loaded host keys --
+    if it IS present but the presented key doesn't match, paramiko raises
+    ``BadHostKeyException`` on its own before this policy is ever
+    consulted. So preloading a persistent file and only auto-trusting
+    truly new hosts here gives real trust-on-first-use: a key that
+    changes after that first connection (MITM, or the box got rebuilt)
+    is rejected instead of silently accepted again.
+    """
+
+    _known_hosts_path: Path  # class-level annotation required by strict mode
+
+    def __init__(self, known_hosts_path: Path) -> None:
+        """Remember where to persist newly-trusted host keys."""
+        self._known_hosts_path = known_hosts_path
+
+    @override
+    def missing_host_key(
+        self, client: paramiko.SSHClient, hostname: str, key: paramiko.PKey
+    ) -> None:
+        """Trust and persist a host key seen for the first time."""
+        client.get_host_keys().add(hostname, key.get_name(), key)
+        self._known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        client.save_host_keys(str(self._known_hosts_path))
+
+
+def _known_hosts_path() -> Path:
+    return data_dir() / "known_hosts"
 
 
 def execute_linux(
@@ -26,9 +64,10 @@ def execute_linux(
     """Run a command on a host via SSH using a key before a password."""
     started = time.monotonic()
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(
-        paramiko.AutoAddPolicy()  # noqa: S507 - Phase 1 explicitly trusts unknown host keys
-    )
+    known_hosts_path = _known_hosts_path()
+    if known_hosts_path.exists():
+        client.load_host_keys(str(known_hosts_path))
+    client.set_missing_host_key_policy(_TrustOnFirstUsePolicy(known_hosts_path))
 
     try:
         if credential.ssh_key:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Final
 
+import requests.exceptions
 import winrm
 
 from cgate.executor.base import DEFAULT_TIMEOUT_SECONDS, ErrorKind, ExecutionResult
@@ -38,6 +39,15 @@ def execute_windows(
     up, so a connection refused on 5986 should not be fatal when 5985
     is available.
 
+    ``server_cert_validation`` is passed explicitly (issue #7): pywinrm
+    already defaults to ``"validate"``, but pinning it in code makes the
+    guarantee explicit rather than resting on the library's default. A
+    certificate that fails validation is NOT treated as "try the other
+    protocol" like a refused/unreachable connection is -- something IS
+    listening and presenting an untrusted cert, so falling back to plain
+    HTTP there would silently downgrade a possibly-MITM'd HTTPS attempt
+    into an unauthenticated cleartext one instead of failing loudly.
+
     Commands are executed via PowerShell (``session.run_ps``) rather
     than the legacy cmd shell. PowerShell handles both PowerShell
     cmdlets (``Get-ChildItem``, ``Set-Service``, ...) and classic
@@ -54,6 +64,7 @@ def execute_windows(
                 _endpoint(hostname, https=attempt_https),
                 auth=(credential.username, credential.password or ""),
                 transport="ntlm",
+                server_cert_validation="validate",
                 # pywinrm requires ``read_timeout_sec > operation_timeout_sec``;
                 # otherwise it raises ``read_timeout_sec must exceed
                 # operation_timeout_sec``. The operation budget covers the
@@ -71,6 +82,8 @@ def execute_windows(
                 duration_ms=int((time.monotonic() - started) * 1000),
                 error_kind=None,
             )
+        except requests.exceptions.SSLError as exc:
+            return _failure_from_winrm_exception(exc, started)
         except Exception as exc:  # noqa: BLE001 - SDK errors lack a closed common hierarchy
             last_exc = exc
             continue
