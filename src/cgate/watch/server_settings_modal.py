@@ -13,6 +13,7 @@ from textual.widgets import ListItem, ListView, Static
 from typing_extensions import override
 
 from cgate.db.mode import AppModeNotSetError, Mode
+from cgate.markup import escape as escape_markup
 from cgate.watch.mode_modal import mode_markup
 from cgate.watch.render import server_badge
 from cgate.watch.theme import CGATE_THEME
@@ -38,7 +39,7 @@ def _updated_by() -> str:
 def _row_markup(connection: Connection, *, auto_allowed: bool) -> str:
     """Render one row: alias, server-type badge, and the auto-allowed checkbox."""
     checkbox = "[✓]" if auto_allowed else "[ ]"
-    return f"{connection.alias}  {server_badge(connection.server_type)}  {checkbox}"
+    return f"{escape_markup(connection.alias)}  {server_badge(connection.server_type)}  {checkbox}"
 
 
 class ServerRow(ListItem):

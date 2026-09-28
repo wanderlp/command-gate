@@ -11,7 +11,6 @@ import asyncio
 import sqlite3
 from typing import TYPE_CHECKING, ClassVar
 
-from rich.markup import escape as escape_markup
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -20,6 +19,7 @@ from typing_extensions import override
 
 from cgate import __version__
 from cgate.db.mode import AppModeNotSetError, Mode
+from cgate.markup import escape as escape_markup
 from cgate.watch.approval import (
     CommandDisappearedError,
     ConnectionNotFoundError,
@@ -163,7 +163,12 @@ class ServersSidebar(Vertical):
             checkbox = "[✓]" if auto_allowed else "[ ]"
             badge = server_badge(connection.server_type)
             _ = list_view.append(
-                ListItem(Static(f"{connection.alias}  {badge}  {checkbox}", markup=True))
+                ListItem(
+                    Static(
+                        f"{escape_markup(connection.alias)}  {badge}  {checkbox}",
+                        markup=True,
+                    )
+                )
             )
 
 

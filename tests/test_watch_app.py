@@ -169,6 +169,32 @@ def test_servers_sidebar_skips_rebuild_when_nothing_changed(repos: Repos) -> Non
     assert call_count == 0
 
 
+def test_servers_sidebar_renders_a_connection_alias_with_brackets(repos: Repos) -> None:
+    """Regression for issue #32: an alias like ``srv[prod]`` would crash
+    ``ServersSidebar`` with ``MarkupError`` because ``Static(markup=True)``
+    was interpolating the alias without escaping. Now the brackets render
+    literally instead of crashing.
+    """
+    _ = repos.connections.add(
+        alias="srv[prod]",
+        hostname="srv-prod.example",
+        server_type=ServerType.WINDOWS,
+        detection_ssh=False,
+        detection_winrm=True,
+    )
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            sidebar = pilot.app.query_one(ServersSidebar)
+            list_view = sidebar.query_one("#servers-list", ListView)
+            return str(list_view.children[0].children[0].content)
+
+    rendered = asyncio.run(scenario())
+    assert "srv\\[prod\\]" in rendered
+    assert "srv[prod]" not in rendered.split("  ", 1)[0]
+
+
 def test_approve_one_executes_and_advances(repos: Repos) -> None:
     lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
     first = repos.commands.add(

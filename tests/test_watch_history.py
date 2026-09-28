@@ -395,3 +395,21 @@ def test_enter_in_the_filter_moves_focus_to_the_results_list(repos: Repos) -> No
             return history.focused is history.query_one("#history-list", ListView)
 
     assert asyncio.run(scenario())
+
+
+def test_batch_with_brackets_in_title_does_not_crash_history(repos: Repos) -> None:
+    """Regression for issue #32: a batch title containing ``[`` or ``]``
+    would crash ``BatchHistoryRow`` with ``MarkupError`` because the row
+    interpolated the title into markup without escaping. Now the brackets
+    render literally."""
+    _resolved_batch_with_command(repos, title="Investigate [WinEvent] timeouts")
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("h")
+            await pilot.pause()
+            return _batch_titles(pilot)[0]
+
+    rendered = asyncio.run(scenario())
+    assert "Investigate \\[WinEvent\\] timeouts" in rendered

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from rich.markup import escape as escape_markup
-
 from cgate.db.types import CommandStatus, ServerType
+from cgate.markup import escape as escape_markup
 from cgate.watch.theme import CGATE_THEME
 
 if TYPE_CHECKING:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
+from textual.widgets import Static
 
 from cgate.connections.store import ConnectionsRepo
 from cgate.db.batches import BatchesRepo
@@ -226,3 +227,21 @@ def test_sidebar_lists_connections_with_flags(repos: Repos) -> None:
     assert "win-1" in content
     assert "[ ]" in content
     assert "[✓]" in content
+
+
+def test_server_settings_modal_renders_a_connection_alias_with_brackets(repos: Repos) -> None:
+    """Regression for issue #32: an alias like ``srv[prod]`` would crash
+    ``ServerSettingsModal`` with ``MarkupError`` because ``_row_markup``
+    interpolated the alias without escaping. Now the brackets render
+    literally."""
+    _add_connection(repos, "srv[prod]", ServerType.WINDOWS)
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            return "\n".join(str(row.query_one(Static).content) for row in pilot.app.screen.query_one("#settings-list").children)
+
+    rendered = asyncio.run(scenario())
+    assert "srv\\[prod\\]" in rendered

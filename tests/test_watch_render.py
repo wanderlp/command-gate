@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from rich.text import Text
+
 from cgate.db.types import Batch, BatchId, Command, CommandId, CommandStatus, ServerType
 from cgate.watch.render import (
     approver_badge,
@@ -74,7 +76,7 @@ def test_approver_badge_shows_human_username() -> None:
 
 def test_approver_badge_escapes_markup_in_username() -> None:
     badge = approver_badge("[bold]evil[/bold]")
-    assert "\\[bold]" in badge
+    assert "\\[bold\\]" in badge
 
 
 def test_format_command_line_includes_reason_when_present() -> None:
@@ -89,7 +91,7 @@ def test_format_command_line_omits_reason_line_when_absent() -> None:
 
 def test_format_command_line_escapes_markup_in_command_text() -> None:
     line = format_command_line(_command(command="echo [bold]hi[/bold]"))
-    assert "\\[bold]" in line
+    assert "\\[bold\\]" in line
 
 
 def test_format_command_detail_shows_full_untruncated_result() -> None:
@@ -121,7 +123,7 @@ def test_risk_warning_shows_the_label() -> None:
 
 
 def test_risk_warning_escapes_markup_in_the_label() -> None:
-    assert "\\[bold]" in risk_warning("[bold]evil[/bold]")
+    assert "\\[bold\\]" in risk_warning("[bold]evil[/bold]")
 
 
 def test_risk_warning_uses_the_theme_error_color() -> None:
@@ -165,7 +167,7 @@ def test_format_command_detail_includes_risk_warning() -> None:
 
 def test_format_batch_header_escapes_markup_in_title() -> None:
     header = format_batch_header(_batch(title="[red]fake[/red] title"))
-    assert "\\[red]" in header
+    assert "\\[red\\]" in header
 
 
 def test_format_batch_header_uses_the_theme_primary_color() -> None:
@@ -188,3 +190,42 @@ def test_format_queue_summary_also_mentions_waiting_batches() -> None:
     summary = format_queue_summary(pending_commands=5, waiting_batches=2)
     assert "5 pending command" in summary
     assert "2 batch(es) waiting" in summary
+
+
+def test_format_command_line_renders_user_xpath_command_without_markup_error() -> None:
+    """Regression for issue #33: the exact ``wevtutil`` XPath command that
+    crashed the user's ``cgate watch`` TUI. Both ``format_command_line``
+    and the output of ``Static(markup=True)`` must round-trip without
+    raising ``rich.errors.MarkupError``.
+    """
+    cmd_text = (
+        "wevtutil qe 'System' /q:\"*[System[Provider[@Name='Microsoft-Windows-Kernel-Power' "
+        "or @Name='User32' or @Name='Microsoft-Windows-Winlogon' or "
+        "@Name='Microsoft-Windows-Eventlog'] and "
+        "(EventID=1074 or EventID=42 or EventID=6005 or EventID=6008 or EventID=6009)]]\""
+        " /c:50 /rd:true /f:xml 2>$null | Out-File 'C:\\Windows\\Temp\\sys-shutdown.xml'"
+    )
+    line = format_command_line(
+        _command(
+            status=CommandStatus.FAILED,
+            command=cmd_text,
+            result="--- stderr ---\nSome failure\n",
+        )
+    )
+    Text.from_markup(line)
+
+
+def test_format_command_detail_renders_user_xpath_command_without_markup_error() -> None:
+    """Same regression as above but for the un-truncated detail modal."""
+    cmd_text = (
+        "wevtutil qe 'System' /q:\"*[System[Provider[@Name='User32'] and (EventID=1074)]]\" "
+        "/c:1 /rd:true /f:xml 2>$null"
+    )
+    detail = format_command_detail(
+        _command(
+            status=CommandStatus.EXECUTED,
+            command=cmd_text,
+            result="<Event>...</Event>",
+        )
+    )
+    Text.from_markup(detail)

@@ -21,6 +21,7 @@ from cgate.watch.command_detail_modal import CommandDetailModal
 from cgate.watch.render import format_batch_header
 from cgate.watch.theme import CGATE_THEME
 from cgate.watch.widgets import CommandRow
+from cgate.markup import escape as escape_markup
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -41,7 +42,12 @@ class BatchHistoryRow(ListItem):
     def __init__(self, batch: Batch) -> None:
         """Render the resolved timestamp and title, and remember the batch id."""
         resolved = batch.resolved_at.strftime("%Y-%m-%d %H:%M") if batch.resolved_at else "?"
-        super().__init__(Static(f"[dim]{resolved}[/dim]  {batch.title}", markup=True))
+        super().__init__(
+            Static(
+                f"[dim]{resolved}[/dim]  {escape_markup(batch.title)}",
+                markup=True,
+            )
+        )
         self.batch_id = batch.id
 
 
