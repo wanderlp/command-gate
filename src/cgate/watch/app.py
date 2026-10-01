@@ -63,7 +63,7 @@ class BatchRow(ListItem):
     def __init__(self, batch: Batch, *, active: bool) -> None:
         """Render the marker/title and remember which batch this row is."""
         marker = "▶" if active else " "
-        style = f"bold {CGATE_THEME.primary}" if active else "dim"
+        style = "bold" if active else "dim"
         super().__init__(
             Static(f"{marker} [{style}]{escape_markup(batch.title)}[/{style}]", markup=True)
         )
