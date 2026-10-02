@@ -214,33 +214,45 @@ def _uninstall_data(data_path: Path, yes: bool) -> bool:
 
     # Enumerate connections first so we can clean each connection's
     # OS keyring entry before the DB row that names it disappears.
+    # If enumeration fails (DB locked, file unreadable, ...), refuse to
+    # proceed to rmtree -- doing so would destroy the only index that
+    # names which keyring entries exist, orphaning the credentials for
+    # every connection permanently with no recovery path (issue #40).
     connections: list[Connection] = []
+    connection_enum_ok = True
     try:
         db = Database(path=db_path())
         init_database(db)
         connections = ConnectionsRepo(db).list_all()
-    except Exception as exc:  # noqa: BLE001 - listing must not block cleanup
+    except Exception as exc:  # noqa: BLE001 - want every DB error surfaced here
+        console.print(f"  [red]Could not enumerate connections:[/red] {exc}")
         console.print(
-            f"  [yellow]Could not enumerate connections:[/yellow] {exc}"
+            "  [red]Refusing to delete the data directory -- doing so would "
+            "orphan the keyring credentials for every connection.[/red]\n"
+            "  [dim]Close any process locking cgate.db (the cgate watch "
+            "TUI, another cgate invocation, the sqlite3 CLI, ...) and "
+            "retry the uninstall.[/dim]"
         )
+        connection_enum_ok = False
         ok = False
 
-    for conn in connections:
+    if connection_enum_ok:
+        for conn in connections:
+            try:
+                remove_credential(conn.alias)
+                console.print(f"  Removed keyring entry for [bold]{conn.alias}[/bold].")
+            except Exception as exc:  # noqa: BLE001 - per-credential failures are non-fatal
+                console.print(
+                    f"  [yellow]Could not remove keyring for {conn.alias}:[/yellow] {exc}"
+                )
+                ok = False
+
         try:
-            remove_credential(conn.alias)
-            console.print(f"  Removed keyring entry for [bold]{conn.alias}[/bold].")
-        except Exception as exc:  # noqa: BLE001 - per-credential failures are non-fatal
-            console.print(
-                f"  [yellow]Could not remove keyring for {conn.alias}:[/yellow] {exc}"
-            )
+            shutil.rmtree(data_path)
+            console.print(f"  Removed [bold]{data_path}[/bold].")
+        except OSError as exc:
+            console.print(f"  [red]Failed to remove {data_path}:[/red] {exc}")
             ok = False
-
-    try:
-        shutil.rmtree(data_path)
-        console.print(f"  Removed [bold]{data_path}[/bold].")
-    except OSError as exc:
-        console.print(f"  [red]Failed to remove {data_path}:[/red] {exc}")
-        ok = False
 
     return ok
 
@@ -384,9 +396,29 @@ def _spawn_delayed_delete(target: Path) -> bool:
     is not ``cgate.exe`` so it never holds the lock our own process does;
     the ``ping`` burns ~4s so our handle on the file is guaranteed closed
     (process exited) by the time ``del`` runs.
+
+    The path argument is routed through ``subprocess.list2cmdline`` so a
+    path containing spaces cannot break out of the argument (issue #44).
+    This does NOT protect against an embedded ``"``: cmd.exe parses its
+    own command line with simple quote-toggle rules (unrelated to the
+    CommandLineToArgvW convention ``list2cmdline`` targets), so a path
+    with a balanced pair of embedded quotes can re-open cmd.exe's
+    metacharacter interpretation and inject a command. ``"`` is not a
+    legal character in a Windows path, so ``target`` can never
+    legitimately contain one -- the guard below turns that invariant
+    into an enforced precondition instead of an assumption.
     """
+    if '"' in str(target):
+        msg = (
+            "target path contains a literal '\"', which is not a legal "
+            "Windows path character and which list2cmdline's escaping "
+            "cannot make safe against cmd.exe's own parser -- refusing to "
+            "build the delete command"
+        )
+        raise ValueError(msg)
     try:
-        cmd_str = f'ping -n 5 127.0.0.1 > nul & del /F /Q "{target}"'
+        del_part = subprocess.list2cmdline(["del", "/F", "/Q", str(target)])
+        cmd_str = f"ping -n 5 127.0.0.1 > nul & {del_part}"
         subprocess.Popen(
             f'cmd.exe /c "{cmd_str}"',
             # DETACHED_PROCESS | CREATE_NO_WINDOW, same combination

@@ -11,7 +11,9 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
+from cgate.cli import uninstall as uninstall_module
 from cgate.cli.main import app
+from cgate.cli.uninstall import _spawn_delayed_delete
 from cgate.db.types import Connection, ServerType
 from cgate.mcp_installer import ClientInstall
 
@@ -438,3 +440,118 @@ def test_uninstall_data_removes_keyring_entries(
     assert result.exit_code == 0, result.stdout
     assert removed == ["srv-test"]
     assert not isolated_env["data"].exists()
+
+
+def test_uninstall_data_aborts_rmtree_when_connection_enumeration_fails(
+    runner: CliRunner, isolated_env: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """issue #40: when listing connections raises (DB locked, file unreadable,
+    schema mismatch, ...), the data directory MUST stay where it is. Otherwise
+    we destroy the only index that names the keyring entries for every
+    connection, and those credentials are orphaned forever -- there is no
+    later code path that can enumerate them.
+
+    The fix routes the rmtree behind the same ``connection_enum_ok`` flag
+    that gates the keyring cleanup, so a failure in either step leaves
+    the data dir intact for a retry.
+    """
+    def list_all_raises(_self: object) -> list[Connection]:
+        msg = "database is locked"
+        raise ConnectionError(msg)
+
+    monkeypatch.setattr(
+        uninstall_module.ConnectionsRepo, "__init__", lambda _self, _db: None
+    )
+    monkeypatch.setattr(
+        uninstall_module.ConnectionsRepo, "list_all", list_all_raises
+    )
+
+    # Sanity: the keyring cleanup must NOT be called either. If it runs,
+    # it would silently succeed (the fake repo has no connections) and the
+    # test would not be proving the abort.
+    cleanup_called: list[str] = []
+
+    def tracking_remove_credential(alias: str) -> None:
+        cleanup_called.append(alias)
+
+    monkeypatch.setattr(
+        "cgate.cli.uninstall.remove_credential", tracking_remove_credential
+    )
+
+    runner.invoke(app, ["uninstall", "--data", "--yes"])
+
+    # The data directory must survive.
+    assert isolated_env["data"].exists(), (
+        "issue #40: rmtree ran even though connection enumeration failed -- "
+        "this orphans every connection's OS keyring credentials."
+    )
+    # The keyring cleanup must also be skipped (nothing to enumerate == nothing to remove).
+    assert cleanup_called == []
+    # (The user-facing message is the third leg of the contract -- without it,
+    # the user would see 'data dir still here' with no explanation and assume
+    # the uninstall silently aborted. The production code prints both the
+    # refusal reason and the retry hint; checking the most specific phrase.)
+
+
+def test_uninstall_data_message_appears_when_aborting_due_to_db_error(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Companion to the above: confirm the user sees the explanation, not just
+    a silent no-op. This is what makes the abort recoverable instead of a
+    mystery -- the message tells them what to fix (close the lock-holder
+    process) and that retrying is the right action.
+    """
+    def list_all_raises(_self: object) -> list[Connection]:
+        msg = "database is locked"
+        raise ConnectionError(msg)
+
+    monkeypatch.setattr(
+        uninstall_module.ConnectionsRepo, "__init__", lambda _self, _db: None
+    )
+    monkeypatch.setattr(uninstall_module.ConnectionsRepo, "list_all", list_all_raises)
+
+    result = runner.invoke(app, ["uninstall", "--data", "--yes"])
+
+    assert "Refusing to delete" in result.stdout
+    assert "orphan" in result.stdout
+
+
+def test_spawn_delayed_delete_quotes_target_with_spaces_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #44: same root cause as ``_spawn_delayed_swap`` -- a target
+    path with a space used to be passed unquoted into the ``cmd.exe /c``
+    string, which would split on the space. ``subprocess.list2cmdline``
+    now quotes the argument so cmd.exe sees the whole path as one token.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    target = Path(r"C:\Program Files\cgate\cgate.exe")
+
+    with patch("subprocess.Popen") as popen:
+        ok = _spawn_delayed_delete(target)
+
+    assert ok is True
+    cmd_line = popen.call_args.args[0]
+    assert r'"C:\Program Files\cgate\cgate.exe"' in cmd_line
+
+
+def test_spawn_delayed_delete_rejects_target_with_embedded_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #44: a target containing a literal ``"`` is not just unsafe to
+    interpolate -- ``list2cmdline``'s escaping targets the CommandLineToArgvW
+    convention, not cmd.exe's own quote-toggle parser, so a path with a
+    *balanced pair* of embedded quotes can re-open cmd.exe's metacharacter
+    interpretation and inject a command past the intended ``del``.
+
+    ``"`` is not a legal Windows path character, so ``target`` can never
+    legitimately contain one; the function must refuse to build the
+    command rather than silently emit a string that looks safe but isn't.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    target = Path(r'C:\evil"target.exe')
+
+    with patch("subprocess.Popen") as popen, pytest.raises(ValueError, match='"'):
+        _spawn_delayed_delete(target)
+
+    popen.assert_not_called()
