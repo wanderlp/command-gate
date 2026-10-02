@@ -38,6 +38,58 @@ def test_spawn_delayed_swap_suppresses_console_window_on_windows(
     assert popen.call_args.kwargs["creationflags"] == _DETACHED_PROCESS | _CREATE_NO_WINDOW
 
 
+def test_spawn_delayed_swap_quotes_paths_with_spaces_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #44: a path containing a space (e.g. ``C:\\Program Files\\cgate``,
+    which is the actual default Windows install location) used to be
+    passed unquoted into the ``cmd.exe /c`` string -- cmd.exe would split
+    on the space and try to execute ``C:\\Program`` as a command. The
+    fix routes the path arguments through ``subprocess.list2cmdline`` so
+    the resulting command line keeps the path as one argument.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    staging = r"C:\Program Files\cgate\cgate.exe.new"
+    target = r"C:\Program Files\cgate\cgate.exe"
+
+    with patch("subprocess.Popen") as popen:
+        ok = _spawn_delayed_swap(staging, target)
+
+    assert ok is True
+    cmd_line = popen.call_args.args[0]
+    # The path with a space must appear inside a quoted region, not raw.
+    assert '"C:\\Program Files\\cgate\\cgate.exe.new"' in cmd_line
+    assert '"C:\\Program Files\\cgate\\cgate.exe"' in cmd_line
+
+
+def test_spawn_delayed_swap_quotes_paths_with_embedded_double_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #44: a path containing a literal ``"`` character would
+    previously terminate the surrounding ``cmd.exe /c "..."`` quoted
+    region early and expose the rest of the path as a separate token
+    (which, combined with embedded ``&`` or ``|``, would let an extra
+    command slip in). ``list2cmdline`` escapes embedded quotes as ``\\"``
+    so the surrounding region stays intact and cmd.exe sees the whole
+    path as one argument.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    staging = r'C:\evil"staging.exe'
+    target = r'C:\target dir\evil"target.exe'
+
+    with patch("subprocess.Popen") as popen:
+        ok = _spawn_delayed_swap(staging, target)
+
+    assert ok is True
+    cmd_line = popen.call_args.args[0]
+    # The embedded " must be escaped as \\", not left raw -- a raw " would
+    # close the surrounding quoted region early.
+    assert r'C:\evil\"staging.exe' in cmd_line
+    assert r'C:\target dir\evil\"target.exe' in cmd_line
+
+
 def test_spawn_delayed_swap_uses_mv_on_non_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
 

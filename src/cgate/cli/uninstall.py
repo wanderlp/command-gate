@@ -396,9 +396,14 @@ def _spawn_delayed_delete(target: Path) -> bool:
     is not ``cgate.exe`` so it never holds the lock our own process does;
     the ``ping`` burns ~4s so our handle on the file is guaranteed closed
     (process exited) by the time ``del`` runs.
+
+    The path argument is routed through ``subprocess.list2cmdline`` so a
+    path containing spaces, embedded double quotes, or backslash-quote
+    sequences cannot break out of the argument (issue #44).
     """
     try:
-        cmd_str = f'ping -n 5 127.0.0.1 > nul & del /F /Q "{target}"'
+        del_part = subprocess.list2cmdline(["del", "/F", "/Q", str(target)])
+        cmd_str = f"ping -n 5 127.0.0.1 > nul & {del_part}"
         subprocess.Popen(
             f'cmd.exe /c "{cmd_str}"',
             # DETACHED_PROCESS | CREATE_NO_WINDOW, same combination

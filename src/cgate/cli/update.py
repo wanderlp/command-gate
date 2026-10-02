@@ -469,18 +469,25 @@ def _spawn_delayed_swap(staging, target) -> bool:
 
     POSIX: ``mv -f`` via start_new_session, no delay needed since there
     is no self-lock.
+
+    The path arguments are routed through ``subprocess.list2cmdline`` so
+    a path containing spaces, embedded double quotes, or backslash-quote
+    sequences cannot break out of the argument (issue #44). The fixed
+    ``ping``, the ``> nul`` redirection, the ``&`` chain operator, and
+    the ``move /Y`` / ``del /F /Q`` invocations are literal -- they
+    contain no user-controlled data and cannot smuggle a metacharacter.
     """
     try:
         if sys.platform == "win32":
             # cmd.exe is the cleanest available process to do a move on
             # Windows. ``ping`` with -n 5 sends 4 pings (about 3-4s) and
-            # exits 0; ``&`` chains commands. The quotes around paths
-            # matter because Windows paths with spaces would otherwise
-            # be split.
-            cmd_str = (
-                f'ping -n 5 127.0.0.1 > nul & '
-                f'move /Y "{staging}" "{target}"'
+            # exits 0; ``&`` chains commands. The ``move`` invocation's
+            # path arguments come through ``list2cmdline`` so spaces and
+            # embedded quotes in a path do not break the argument.
+            move_part = subprocess.list2cmdline(
+                ["move", "/Y", str(staging), str(target)]
             )
+            cmd_str = f"ping -n 5 127.0.0.1 > nul & {move_part}"
             subprocess.Popen(
                 f"cmd.exe /c \"{cmd_str}\"",
                 # DETACHED_PROCESS | CREATE_NO_WINDOW: detach from our console

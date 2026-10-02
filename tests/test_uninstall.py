@@ -514,3 +514,40 @@ def test_uninstall_data_message_appears_when_aborting_due_to_db_error(
 
     assert "Refusing to delete" in result.stdout
     assert "orphan" in result.stdout
+
+
+def test_spawn_delayed_delete_quotes_target_with_spaces_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #44: same root cause as ``_spawn_delayed_swap`` -- a target
+    path with a space used to be passed unquoted into the ``cmd.exe /c``
+    string, which would split on the space. ``subprocess.list2cmdline``
+    now quotes the argument so cmd.exe sees the whole path as one token.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    target = Path(r"C:\Program Files\cgate\cgate.exe")
+
+    with patch("subprocess.Popen") as popen:
+        ok = _spawn_delayed_delete(target)
+
+    assert ok is True
+    cmd_line = popen.call_args.args[0]
+    assert r'"C:\Program Files\cgate\cgate.exe"' in cmd_line
+
+
+def test_spawn_delayed_delete_quotes_target_with_embedded_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #44: embedded ``"`` in the path must be escaped, otherwise it
+    closes the surrounding ``cmd.exe /c "..."`` quoted region early and
+    exposes the rest of the path as a separate token.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    target = Path(r'C:\evil"target.exe')
+
+    with patch("subprocess.Popen") as popen:
+        ok = _spawn_delayed_delete(target)
+
+    assert ok is True
+    cmd_line = popen.call_args.args[0]
+    assert r'C:\evil\"target.exe' in cmd_line
