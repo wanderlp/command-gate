@@ -543,6 +543,110 @@ def test_dbs_are_isolated_per_path(tmp_path: Path) -> None:
     assert len(repo2.list_pending()) == 0
 
 
+def test_init_database_enables_wal_journal_mode(tmp_path: Path) -> None:
+    """issue #42: `init_database` must set `PRAGMA journal_mode=WAL` so
+    readers do not block writers -- the cgate watch TUI polls every 1.5s
+    while an MCP server process writes concurrently, and the docstring on
+    this module already calls that the documented dual-process design.
+
+    The pragma lives on its own connection (see ``_enable_wal_mode``) so
+    that the DDL/DML sequence in the main ``connect`` context does not
+    leave Python's sqlite3 module in a state where the final commit
+    raises "cannot commit transaction - SQL statements in progress".
+    """
+    db = _db(tmp_path)
+    with connect(db) as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+
+
+def test_wal_mode_persists_across_connections(tmp_path: Path) -> None:
+    """WAL is sticky on the database file itself, not just the connection.
+    A subsequent `connect` call (or one opened by a different process) must
+    observe WAL without re-applying the pragma. Verifying here so a future
+    refactor that moves the pragma out of `init_database` cannot regress
+    this property without a test failure.
+    """
+    db = _db(tmp_path)
+    # Second connection, fresh.
+    with connect(db) as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+
+
+def test_wal_mode_silently_upgrades_an_existing_rollback_journal_db(
+    tmp_path: Path,
+) -> None:
+    """Existing databases that were created before this change are using
+    the rollback journal. The first ``init_database`` call against them
+    must silently upgrade them to WAL -- no schema_version bump, no data
+    migration, no error. The pragma's return value confirms it took.
+
+    Setup: create the DB file directly via raw sqlite3 (which never sets
+    WAL), sanity-check that the file is in the SQLite default
+    ``delete`` (rollback) journal mode, then run ``init_database`` and
+    verify the upgrade happened.
+    """
+    db_path = tmp_path / "legacy.db"
+    db = Database(path=db_path)
+    # Touch the file via raw sqlite3, without going through
+    # ``init_database`` (so the WAL pragma is never applied).
+    with sqlite3.connect(db_path) as raw_conn:
+        raw_conn.row_factory = sqlite3.Row
+        initial = raw_conn.execute("PRAGMA journal_mode").fetchone()[0]
+    # Sanity: a freshly-created DB without our PRAGMA should still be in
+    # rollback journal mode (the SQLite default).
+    assert initial.lower() == "delete", (
+        "Sanity: a freshly-created DB without our PRAGMA should still be in "
+        "rollback journal mode (the SQLite default)."
+    )
+    # Now go through cgate's init_database and verify WAL is enabled.
+    init_database(db)
+    with connect(db) as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+
+
+def test_wal_mode_enabling_is_idempotent_across_repeated_init(tmp_path: Path) -> None:
+    """``init_database`` may be called more than once on the same database
+    (idempotency is part of its contract). The WAL pragma must continue
+    to report "wal" -- never silently flip to "delete" or another mode --
+    after the second call.
+    """
+    db = _db(tmp_path)
+    init_database(db)
+    init_database(db)
+    with connect(db) as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+
+
+def test_concurrent_reader_does_not_block_under_wal(tmp_path: Path) -> None:
+    """The whole point of WAL for cgate: a reader holding an open
+    transaction must not block a writer from acquiring the reserved lock.
+    Without WAL the writer would block until the reader's transaction
+    ended (or, with the 30s busy-timeout, return "database is locked"
+    spuriously in the TUI). Under WAL a writer succeeds immediately.
+    """
+    db = _db(tmp_path)
+    with connect(db) as reader:
+        # Open a read transaction explicitly so the writer has to wait
+        # for it under rollback-journal mode.
+        _ = reader.execute("BEGIN")
+        _ = reader.execute("SELECT 1").fetchone()
+        # A second connection writes -- under WAL this succeeds without
+        # touching the reader's transaction.
+        with connect(db) as writer:
+            _ = writer.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (999_999, "2026-10-02T00:00:00Z"),
+            )
+        # The reader's transaction is still valid; we can still see the
+        # pre-write snapshot.
+        _ = reader.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
+        _ = reader.execute("ROLLBACK")
+
+
 def test_init_creates_app_mode_and_server_settings_tables(tmp_path: Path) -> None:
     db = _db(tmp_path)
     with connect(db) as conn:
