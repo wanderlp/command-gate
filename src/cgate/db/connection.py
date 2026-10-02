@@ -45,8 +45,11 @@ class Database:
 def connect(database: Database) -> Generator[sqlite3.Connection, None, None]:
     """Open a SQLite connection. Commits on clean exit, rolls back on exception.
 
-    Sets row_factory=sqlite3.Row for column-name access, and PRAGMA foreign_keys=ON
-    so FK references in the schema are enforced.
+    Sets row_factory=sqlite3.Row for column-name access and PRAGMA foreign_keys=ON
+    so FK references in the schema are enforced. ``PRAGMA journal_mode=WAL`` is
+    applied by ``init_database`` rather than here -- WAL is sticky on the
+    database file, so a single enable at init time covers every subsequent
+    connection (including one opened by a different process).
 
     ``timeout=30`` (sqlite3's default is 5s) because `cgate watch` and the
     MCP server backing an AI agent's AUTO-mode auto-execution are two
@@ -63,6 +66,33 @@ def connect(database: Database) -> Generator[sqlite3.Connection, None, None]:
     except BaseException:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+
+def _enable_wal_mode(database: Database) -> None:
+    """Ensure the database file is in WAL journal mode, on a one-shot connection.
+
+    `PRAGMA journal_mode = WAL` writes a WAL header into the database file --
+    an operation that, combined with the kind of DDL/DML sequence
+    ``init_database`` runs in the main ``connect`` context, can leave Python's
+    sqlite3 module in a state where the final ``conn.commit()`` raises
+    ``OperationalError: cannot commit transaction - SQL statements in
+    progress``. Setting the pragma here on a dedicated short-lived connection
+    (and committing it immediately) sidesteps that interaction entirely.
+
+    The pragma is sticky on the database file, so every subsequent
+    connection -- including one opened by a different process against a DB
+    that was previously in rollback-journal mode -- inherits WAL mode
+    without us having to apply the pragma again. Existing pre-WAL databases
+    are silently upgraded on the next ``init_database`` call, with no
+    schema_version bump or data migration needed.
+    """
+    database.path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(database.path, timeout=30)
+    try:
+        _ = conn.execute("PRAGMA journal_mode = WAL")
+        conn.commit()
     finally:
         conn.close()
 
@@ -90,8 +120,13 @@ def init_database(database: Database) -> None:
     committed, then collide on the second's INSERT into the
     ``version`` PRIMARY KEY. ``OR IGNORE`` makes the row idempotent in a
     single statement instead.
+
+    Also enables WAL journal mode on the database file (issue #42). See
+    ``_enable_wal_mode`` for why the pragma runs on its own connection
+    rather than inside ``connect``.
     """
     database.path.parent.mkdir(parents=True, exist_ok=True)
+    _enable_wal_mode(database)
     with connect(database) as conn:
         _ = conn.executescript(SCHEMA_SQL)
         _ = conn.executescript(_MODE_SETTINGS_SQL)
