@@ -12,6 +12,7 @@ from textual.widgets import Static
 from typing_extensions import override
 
 from cgate.db.mode import AppModeNotSetError, Mode
+from cgate.markup import escape as escape_markup
 from cgate.watch.theme import CGATE_THEME
 
 if TYPE_CHECKING:
@@ -101,7 +102,7 @@ class ModeModal(ModalScreen[bool]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             _ = self.query_one("#mode-error", Static).update(
-                f"[{error}]Could not save the mode:[/{error}] {exc}"
+                f"[{error}]Could not save the mode:[/{error}] {escape_markup(str(exc))}"
             )
             return
         self.dismiss(True)  # noqa: FBT003 - ModalScreen[bool].dismiss takes the result positionally

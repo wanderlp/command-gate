@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from textual.widgets import Input, ListView, Static
@@ -413,3 +415,29 @@ def test_batch_with_brackets_in_title_does_not_crash_history(repos: Repos) -> No
 
     rendered = asyncio.run(scenario())
     assert "Investigate \\[WinEvent\\] timeouts" in rendered
+
+
+def test_history_modal_db_error_with_brackets_does_not_crash(repos: Repos) -> None:
+    """Regression for issue #39: ``HistoryModal.on_mount`` used to
+    interpolate ``{exc}`` straight into ``Static.update``, so a
+    ``sqlite3.Error`` whose message contained ``[`` or ``]`` crashed
+    ``rich.errors.MarkupError`` the moment the user opened the History
+    screen. The error path must now escape the exception text first.
+    """
+    bracketed_msg = "no such column: [secret]"
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            with patch.object(
+                repos.batches,
+                "list_resolved",
+                side_effect=sqlite3.OperationalError(bracketed_msg),
+            ):
+                await pilot.press("h")
+                await pilot.pause()
+            return str(pilot.app.screen.query_one("#history-detail-header", Static).content)
+
+    header = asyncio.run(scenario())
+    assert "\\[secret\\]" in header
+    assert "[secret]" not in header

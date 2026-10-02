@@ -137,7 +137,7 @@ class ServerSettingsModal(ModalScreen[bool]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             _ = self.query_one("#settings-error", Static).update(
-                f"[{error}]Could not read the servers:[/{error}] {exc}"
+                f"[{error}]Could not read the servers:[/{error}] {escape_markup(str(exc))}"
             )
             return
         if self._state:
@@ -167,7 +167,7 @@ class ServerSettingsModal(ModalScreen[bool]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             _ = self.query_one("#settings-error", Static).update(
-                f"[{error}]Could not save the changes:[/{error}] {exc}"
+                f"[{error}]Could not save the changes:[/{error}] {escape_markup(str(exc))}"
             )
             return
         self.dismiss(True)  # noqa: FBT003 - ModalScreen[bool].dismiss takes the result positionally

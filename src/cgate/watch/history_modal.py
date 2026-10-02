@@ -126,7 +126,7 @@ class HistoryModal(ModalScreen[None]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             self.query_one("#history-detail-header", Static).update(
-                f"[{error}]Could not read history:[/{error}] {exc}"
+                f"[{error}]Could not read history:[/{error}] {escape_markup(str(exc))}"
             )
             return
         self._search_text = {batch.id: self._index_batch(batch) for batch in self._resolved}
@@ -211,7 +211,7 @@ class HistoryModal(ModalScreen[None]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             self.query_one("#history-detail-header", Static).update(
-                f"[{error}]Could not read this command:[/{error}] {exc}"
+                f"[{error}]Could not read this command:[/{error}] {escape_markup(str(exc))}"
             )
             return
         if command is not None:
@@ -227,7 +227,7 @@ class HistoryModal(ModalScreen[None]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             self.query_one("#history-detail-header", Static).update(
-                f"[{error}]Could not read this batch's commands:[/{error}] {exc}"
+                f"[{error}]Could not read this batch's commands:[/{error}] {escape_markup(str(exc))}"
             )
             return
         for command in commands_in_batch:

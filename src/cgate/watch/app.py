@@ -329,7 +329,7 @@ class WatchApp(App[None]):
         error = CGATE_THEME.error
         self._render_notice(
             (
-                f"[{error}]Could not read the database:[/{error}] {exc}\n"
+                f"[{error}]Could not read the database:[/{error}] {escape_markup(str(exc))}\n"
                 "[dim]Check that no other cgate process is locking "
                 "cgate.db. The next read will retry automatically.[/dim]"
             ),
@@ -349,7 +349,8 @@ class WatchApp(App[None]):
         """
         error = CGATE_THEME.error
         self._render_notice(
-            f"[{error}]Could not approve this command:[/{error}] {exc}", "approval error"
+            f"[{error}]Could not approve this command:[/{error}] {escape_markup(str(exc))}",
+            "approval error",
         )
 
     def _global_mode(self) -> Mode:
