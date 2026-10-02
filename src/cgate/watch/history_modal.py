@@ -227,7 +227,8 @@ class HistoryModal(ModalScreen[None]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             self.query_one("#history-detail-header", Static).update(
-                f"[{error}]Could not read this batch's commands:[/{error}] {escape_markup(str(exc))}"
+                f"[{error}]Could not read this batch's commands:[/{error}] "
+                f"{escape_markup(str(exc))}"
             )
             return
         for command in commands_in_batch:
