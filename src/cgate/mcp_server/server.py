@@ -43,6 +43,30 @@ ToolPayload: TypeAlias = (
     | dict[str, str]
 )
 
+_SERVER_INSTRUCTIONS = (
+    "cgate lets you run commands on servers gated behind a human approval "
+    "queue -- or, for servers explicitly opted into AUTO mode, executed "
+    "immediately. Typical flow: call list_connections to see which server "
+    "aliases exist and each one's server_type (the dialect your command "
+    "must be written in), then get_mode to see whether the target server "
+    "executes immediately or queues for a human. Call propose_command to "
+    'register a command. If the response comes back status: "pending", '
+    "nothing has run yet -- call check_status(batch_id) later to learn "
+    "whether a human approved it, rejected it, or it finished executing "
+    'and what the result was. If it comes back status: "executed" or '
+    '"failed", it already ran under AUTO mode and result holds the '
+    "output. Match command syntax to the target's server_type: WINDOWS "
+    "commands run through a real PowerShell session (run_ps) -- write "
+    "idiomatic PowerShell, not legacy cmd.exe batch syntax, keep "
+    "Windows's ~8KB command-line length limit in mind, and avoid "
+    "cramming multi-step logic with nested quotes/brackets into one "
+    "dense pipeline (PowerShell's quoting of long single-line pipelines "
+    "is fragile). LINUX commands run through a POSIX shell over SSH. A "
+    "command flagged risky_command always queues for a human regardless "
+    "of mode -- but the absence of that flag is not a safety guarantee, "
+    "only a heuristic over a known set of destructive patterns."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class _ToolDeps:
@@ -91,7 +115,11 @@ def _tools() -> list[types.Tool]:
                 "`risk_label` names what was matched; this is a heuristic, not a "
                 "guarantee, so don't rely on its absence to mean a command is safe. "
                 "batch_title is required; batch_description is optional. If batch_id "
-                "is omitted, a new batch is created."
+                "is omitted, or refers to a batch that no longer exists, a new batch "
+                "is created -- check the returned batch_id, it may differ from what "
+                'you passed. When the response comes back status: "pending", '
+                "nothing has executed yet; call check_status with the returned "
+                "batch_id later to learn the outcome."
             ),
             input_schema={
                 "type": "object",
@@ -102,11 +130,21 @@ def _tools() -> list[types.Tool]:
                     },
                     "command": {
                         "type": "string",
-                        "description": "Exact shell or PowerShell command to register.",
+                        "description": (
+                            "Exact command to register, written in the target server's "
+                            "dialect: PowerShell for a WINDOWS server_alias (it runs via "
+                            "a live PowerShell session, not cmd.exe), POSIX shell for a "
+                            "LINUX one. Check server_type via list_connections first if "
+                            "unsure."
+                        ),
                     },
                     "batch_id": {
                         "type": "string",
-                        "description": "Optional existing batch ID to append to.",
+                        "description": (
+                            "Optional existing batch ID to append to. If it no longer "
+                            "exists, a new batch is created instead -- compare against "
+                            "the returned batch_id."
+                        ),
                     },
                     "batch_title": {
                         "type": "string",
@@ -157,7 +195,10 @@ def _tools() -> list[types.Tool]:
             name="check_status",
             description=(
                 "Return every command in a batch with status, result, and audit fields. "
-                "States are pending, approved, rejected, executed, and failed."
+                "States are pending, approved, rejected, executed, and failed. Call "
+                'this after a propose_command that returned status: "pending" to '
+                "learn whether a human approved or rejected it, and to retrieve the "
+                "result once it executes."
             ),
             input_schema={
                 "type": "object",
@@ -244,6 +285,7 @@ def build_server() -> Server[None]:
     return Server(
         "command-gate",
         version=__version__,
+        instructions=_SERVER_INSTRUCTIONS,
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
         lifespan=_lifespan,
