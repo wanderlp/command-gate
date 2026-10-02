@@ -4,6 +4,7 @@ Lives in ``cgate.core`` (not ``cgate.cli``) because it's shared by the
 interactive CLI and the non-interactive ``cgate.helper`` binary, which must
 not import anything from ``cgate.cli`` (typer/rich/mcp/paramiko/pywinrm).
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -88,4 +89,3 @@ def _utf8_byte_size(lines: list[str]) -> int:
 
 
 __all__ = ["append_log"]
-
