@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from textual.widgets import Input, ListView, Static
@@ -395,3 +397,47 @@ def test_enter_in_the_filter_moves_focus_to_the_results_list(repos: Repos) -> No
             return history.focused is history.query_one("#history-list", ListView)
 
     assert asyncio.run(scenario())
+
+
+def test_batch_with_brackets_in_title_does_not_crash_history(repos: Repos) -> None:
+    """Regression for issue #32: a batch title containing ``[`` or ``]``
+    would crash ``BatchHistoryRow`` with ``MarkupError`` because the row
+    interpolated the title into markup without escaping. Now the brackets
+    render literally."""
+    _resolved_batch_with_command(repos, title="Investigate [WinEvent] timeouts")
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("h")
+            await pilot.pause()
+            return _batch_titles(pilot)[0]
+
+    rendered = asyncio.run(scenario())
+    assert "Investigate \\[WinEvent\\] timeouts" in rendered
+
+
+def test_history_modal_db_error_with_brackets_does_not_crash(repos: Repos) -> None:
+    """Regression for issue #39: ``HistoryModal.on_mount`` used to
+    interpolate ``{exc}`` straight into ``Static.update``, so a
+    ``sqlite3.Error`` whose message contained ``[`` or ``]`` crashed
+    ``rich.errors.MarkupError`` the moment the user opened the History
+    screen. The error path must now escape the exception text first.
+    """
+    bracketed_msg = "no such column: [secret]"
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            with patch.object(
+                repos.batches,
+                "list_resolved",
+                side_effect=sqlite3.OperationalError(bracketed_msg),
+            ):
+                await pilot.press("h")
+                await pilot.pause()
+            return str(pilot.app.screen.query_one("#history-detail-header", Static).content)
+
+    header = asyncio.run(scenario())
+    assert "\\[secret\\]" in header
+    assert "[secret]" not in header

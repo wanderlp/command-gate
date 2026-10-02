@@ -11,7 +11,6 @@ import asyncio
 import sqlite3
 from typing import TYPE_CHECKING, ClassVar
 
-from rich.markup import escape as escape_markup
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -20,6 +19,7 @@ from typing_extensions import override
 
 from cgate import __version__
 from cgate.db.mode import AppModeNotSetError, Mode
+from cgate.markup import escape as escape_markup
 from cgate.watch.approval import (
     CommandDisappearedError,
     ConnectionNotFoundError,
@@ -63,7 +63,7 @@ class BatchRow(ListItem):
     def __init__(self, batch: Batch, *, active: bool) -> None:
         """Render the marker/title and remember which batch this row is."""
         marker = "▶" if active else " "
-        style = f"bold {CGATE_THEME.primary}" if active else "dim"
+        style = "bold" if active else "dim"
         super().__init__(
             Static(f"{marker} [{style}]{escape_markup(batch.title)}[/{style}]", markup=True)
         )
@@ -163,7 +163,12 @@ class ServersSidebar(Vertical):
             checkbox = "[✓]" if auto_allowed else "[ ]"
             badge = server_badge(connection.server_type)
             _ = list_view.append(
-                ListItem(Static(f"{connection.alias}  {badge}  {checkbox}", markup=True))
+                ListItem(
+                    Static(
+                        f"{escape_markup(connection.alias)}  {badge}  {checkbox}",
+                        markup=True,
+                    )
+                )
             )
 
 
@@ -324,7 +329,7 @@ class WatchApp(App[None]):
         error = CGATE_THEME.error
         self._render_notice(
             (
-                f"[{error}]Could not read the database:[/{error}] {exc}\n"
+                f"[{error}]Could not read the database:[/{error}] {escape_markup(str(exc))}\n"
                 "[dim]Check that no other cgate process is locking "
                 "cgate.db. The next read will retry automatically.[/dim]"
             ),
@@ -344,7 +349,8 @@ class WatchApp(App[None]):
         """
         error = CGATE_THEME.error
         self._render_notice(
-            f"[{error}]Could not approve this command:[/{error}] {exc}", "approval error"
+            f"[{error}]Could not approve this command:[/{error}] {escape_markup(str(exc))}",
+            "approval error",
         )
 
     def _global_mode(self) -> Mode:

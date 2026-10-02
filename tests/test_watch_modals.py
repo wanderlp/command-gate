@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
+from textual.widgets import Static
 
 from cgate.connections.store import ConnectionsRepo
 from cgate.db.batches import BatchesRepo
@@ -226,3 +229,77 @@ def test_sidebar_lists_connections_with_flags(repos: Repos) -> None:
     assert "win-1" in content
     assert "[ ]" in content
     assert "[✓]" in content
+
+
+def test_server_settings_modal_renders_a_connection_alias_with_brackets(repos: Repos) -> None:
+    """Regression for issue #32: an alias like ``srv[prod]`` would crash
+    ``ServerSettingsModal`` with ``MarkupError`` because ``_row_markup``
+    interpolated the alias without escaping. Now the brackets render
+    literally."""
+    _add_connection(repos, "srv[prod]", ServerType.WINDOWS)
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            return "\n".join(str(row.query_one(Static).content) for row in pilot.app.screen.query_one("#settings-list").children)
+
+    rendered = asyncio.run(scenario())
+    assert "srv\\[prod\\]" in rendered
+
+
+def test_server_settings_modal_db_error_with_brackets_does_not_crash(repos: Repos) -> None:
+    """Regression for issue #39: ``ServerSettingsModal.on_mount`` used to
+    interpolate ``{exc}`` straight into ``Static.update``, so a
+    ``sqlite3.Error`` whose message contained ``[`` or ``]`` would crash
+    ``rich.errors.MarkupError``. The error banner must now escape the
+    exception text first.
+    """
+    bracketed_msg = "database is locked [path=/tmp/cgate.db]"
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            with patch.object(
+                repos.connections,
+                "list_all",
+                side_effect=sqlite3.OperationalError(bracketed_msg),
+            ):
+                await pilot.press("s")
+                await pilot.pause()
+            return str(pilot.app.screen.query_one("#settings-error", Static).content)
+
+    content = asyncio.run(scenario())
+    assert "\\[path=/tmp/cgate.db\\]" in content
+    assert "[path=/tmp/cgate.db]" not in content
+
+
+def test_mode_modal_db_error_with_brackets_does_not_crash(repos: Repos) -> None:
+    """Regression for issue #39: ``ModeModal.action_commit`` used to
+    interpolate ``{exc}`` straight into ``Static.update``, so a
+    ``sqlite3.Error`` whose message contained ``[`` or ``]`` would crash
+    ``rich.errors.MarkupError``. The error banner must now escape the
+    exception text first.
+    """
+    bracketed_msg = "constraint failed: [mode]"
+    # Seed the mode so the commit write is attempted.
+    repos.mode.set(mode=Mode.PROPOSE, updated_by="test")
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            with patch.object(
+                repos.mode,
+                "set",
+                side_effect=sqlite3.OperationalError(bracketed_msg),
+            ):
+                await pilot.press("m")
+                await pilot.pause()
+                await pilot.press("y")
+                await pilot.pause()
+            return str(pilot.app.screen.query_one("#mode-error", Static).content)
+
+    content = asyncio.run(scenario())
+    assert "\\[mode\\]" in content
+    assert "[mode]" not in content

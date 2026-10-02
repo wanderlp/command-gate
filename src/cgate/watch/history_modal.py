@@ -21,6 +21,7 @@ from cgate.watch.command_detail_modal import CommandDetailModal
 from cgate.watch.render import format_batch_header
 from cgate.watch.theme import CGATE_THEME
 from cgate.watch.widgets import CommandRow
+from cgate.markup import escape as escape_markup
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -41,7 +42,12 @@ class BatchHistoryRow(ListItem):
     def __init__(self, batch: Batch) -> None:
         """Render the resolved timestamp and title, and remember the batch id."""
         resolved = batch.resolved_at.strftime("%Y-%m-%d %H:%M") if batch.resolved_at else "?"
-        super().__init__(Static(f"[dim]{resolved}[/dim]  {batch.title}", markup=True))
+        super().__init__(
+            Static(
+                f"[dim]{resolved}[/dim]  {escape_markup(batch.title)}",
+                markup=True,
+            )
+        )
         self.batch_id = batch.id
 
 
@@ -120,7 +126,7 @@ class HistoryModal(ModalScreen[None]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             self.query_one("#history-detail-header", Static).update(
-                f"[{error}]Could not read history:[/{error}] {exc}"
+                f"[{error}]Could not read history:[/{error}] {escape_markup(str(exc))}"
             )
             return
         self._search_text = {batch.id: self._index_batch(batch) for batch in self._resolved}
@@ -205,7 +211,7 @@ class HistoryModal(ModalScreen[None]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             self.query_one("#history-detail-header", Static).update(
-                f"[{error}]Could not read this command:[/{error}] {exc}"
+                f"[{error}]Could not read this command:[/{error}] {escape_markup(str(exc))}"
             )
             return
         if command is not None:
@@ -221,7 +227,8 @@ class HistoryModal(ModalScreen[None]):
         except sqlite3.Error as exc:
             error = CGATE_THEME.error
             self.query_one("#history-detail-header", Static).update(
-                f"[{error}]Could not read this batch's commands:[/{error}] {exc}"
+                f"[{error}]Could not read this batch's commands:[/{error}] "
+                f"{escape_markup(str(exc))}"
             )
             return
         for command in commands_in_batch:

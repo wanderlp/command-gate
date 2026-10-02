@@ -169,6 +169,32 @@ def test_servers_sidebar_skips_rebuild_when_nothing_changed(repos: Repos) -> Non
     assert call_count == 0
 
 
+def test_servers_sidebar_renders_a_connection_alias_with_brackets(repos: Repos) -> None:
+    """Regression for issue #32: an alias like ``srv[prod]`` would crash
+    ``ServersSidebar`` with ``MarkupError`` because ``Static(markup=True)``
+    was interpolating the alias without escaping. Now the brackets render
+    literally instead of crashing.
+    """
+    _ = repos.connections.add(
+        alias="srv[prod]",
+        hostname="srv-prod.example",
+        server_type=ServerType.WINDOWS,
+        detection_ssh=False,
+        detection_winrm=True,
+    )
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            sidebar = pilot.app.query_one(ServersSidebar)
+            list_view = sidebar.query_one("#servers-list", ListView)
+            return str(list_view.children[0].children[0].content)
+
+    rendered = asyncio.run(scenario())
+    assert "srv\\[prod\\]" in rendered
+    assert "srv[prod]" not in rendered.split("  ", 1)[0]
+
+
 def test_approve_one_executes_and_advances(repos: Repos) -> None:
     lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
     first = repos.commands.add(
@@ -561,3 +587,58 @@ def test_approve_action_swallows_connection_not_found_from_approve_one(repos: Re
     notice, idle = asyncio.run(scenario())
     assert "linux-1" in notice
     assert idle, "_approve must release _busy even when approve_one raises ConnectionNotFoundError"
+
+
+def test_db_error_with_brackets_in_message_does_not_crash_tui(repos: Repos) -> None:
+    """Regression for issue #39: a sqlite3.Error whose ``str()`` contains
+    ``[`` or ``]`` used to crash ``_render_db_error`` via ``Static.update``
+    → ``rich.errors.MarkupError`` (the same class #33 fixed for the
+    list-row sites). The error banner must now escape the exception text
+    before interpolating it into markup.
+    """
+    bracketed_msg = "table [secret] is missing"
+    exc = sqlite3.OperationalError(bracketed_msg)
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            with patch("cgate.watch.app.count_waiting", side_effect=exc):
+                pilot.app._refresh()  # noqa: SLF001
+                await pilot.pause()
+            return str(pilot.app.query_one("#waiting-notice").content)
+
+    notice = asyncio.run(scenario())
+    # The brackets must reach the rendered notice literally, escaped -- so
+    # Textual's parser doesn't try to interpret them as a tag.
+    assert "\\[secret\\]" in notice
+    assert "[secret]" not in notice
+
+
+def test_approval_error_with_brackets_in_connection_alias_does_not_crash_tui(repos: Repos) -> None:
+    """Regression for issue #39: a connection alias containing ``[`` or
+    ``]`` -- reachable through any source that can write to the connections
+    table, including manual SQL -- triggers ``ConnectionNotFoundError`` with
+    the alias embedded in the message. ``_render_approval_error`` must
+    escape the exception text, otherwise the TUI crashes the same way
+    issue #33 crashed the list rows."""
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    _ = repos.commands.add(
+        batch_id=lot.id,
+        server_alias="srv[prod]",
+        server_type=ServerType.WINDOWS,
+        command="uptime",
+    )
+    # No matching connection is registered, so mark_approved raises
+    # ConnectionNotFoundError("srv[prod]") before reaching the executor.
+
+    async def scenario() -> str:
+        async with _app(repos).run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+            return str(pilot.app.query_one("#waiting-notice").content)
+
+    notice = asyncio.run(scenario())
+    # The bracket-bearing alias must reach the notice escaped.
+    assert "srv\\[prod\\]" in notice
+    assert "srv[prod]" not in notice
