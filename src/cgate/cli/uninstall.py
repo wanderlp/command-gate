@@ -214,33 +214,45 @@ def _uninstall_data(data_path: Path, yes: bool) -> bool:
 
     # Enumerate connections first so we can clean each connection's
     # OS keyring entry before the DB row that names it disappears.
+    # If enumeration fails (DB locked, file unreadable, ...), refuse to
+    # proceed to rmtree -- doing so would destroy the only index that
+    # names which keyring entries exist, orphaning the credentials for
+    # every connection permanently with no recovery path (issue #40).
     connections: list[Connection] = []
+    connection_enum_ok = True
     try:
         db = Database(path=db_path())
         init_database(db)
         connections = ConnectionsRepo(db).list_all()
-    except Exception as exc:  # noqa: BLE001 - listing must not block cleanup
+    except Exception as exc:  # noqa: BLE001 - want every DB error surfaced here
+        console.print(f"  [red]Could not enumerate connections:[/red] {exc}")
         console.print(
-            f"  [yellow]Could not enumerate connections:[/yellow] {exc}"
+            "  [red]Refusing to delete the data directory -- doing so would "
+            "orphan the keyring credentials for every connection.[/red]\n"
+            "  [dim]Close any process locking cgate.db (the cgate watch "
+            "TUI, another cgate invocation, the sqlite3 CLI, ...) and "
+            "retry the uninstall.[/dim]"
         )
+        connection_enum_ok = False
         ok = False
 
-    for conn in connections:
+    if connection_enum_ok:
+        for conn in connections:
+            try:
+                remove_credential(conn.alias)
+                console.print(f"  Removed keyring entry for [bold]{conn.alias}[/bold].")
+            except Exception as exc:  # noqa: BLE001 - per-credential failures are non-fatal
+                console.print(
+                    f"  [yellow]Could not remove keyring for {conn.alias}:[/yellow] {exc}"
+                )
+                ok = False
+
         try:
-            remove_credential(conn.alias)
-            console.print(f"  Removed keyring entry for [bold]{conn.alias}[/bold].")
-        except Exception as exc:  # noqa: BLE001 - per-credential failures are non-fatal
-            console.print(
-                f"  [yellow]Could not remove keyring for {conn.alias}:[/yellow] {exc}"
-            )
+            shutil.rmtree(data_path)
+            console.print(f"  Removed [bold]{data_path}[/bold].")
+        except OSError as exc:
+            console.print(f"  [red]Failed to remove {data_path}:[/red] {exc}")
             ok = False
-
-    try:
-        shutil.rmtree(data_path)
-        console.print(f"  Removed [bold]{data_path}[/bold].")
-    except OSError as exc:
-        console.print(f"  [red]Failed to remove {data_path}:[/red] {exc}")
-        ok = False
 
     return ok
 

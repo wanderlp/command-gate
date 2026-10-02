@@ -11,7 +11,9 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
+from cgate.cli import uninstall as uninstall_module
 from cgate.cli.main import app
+from cgate.cli.uninstall import _spawn_delayed_delete
 from cgate.db.types import Connection, ServerType
 from cgate.mcp_installer import ClientInstall
 
@@ -438,3 +440,77 @@ def test_uninstall_data_removes_keyring_entries(
     assert result.exit_code == 0, result.stdout
     assert removed == ["srv-test"]
     assert not isolated_env["data"].exists()
+
+
+def test_uninstall_data_aborts_rmtree_when_connection_enumeration_fails(
+    runner: CliRunner, isolated_env: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """issue #40: when listing connections raises (DB locked, file unreadable,
+    schema mismatch, ...), the data directory MUST stay where it is. Otherwise
+    we destroy the only index that names the keyring entries for every
+    connection, and those credentials are orphaned forever -- there is no
+    later code path that can enumerate them.
+
+    The fix routes the rmtree behind the same ``connection_enum_ok`` flag
+    that gates the keyring cleanup, so a failure in either step leaves
+    the data dir intact for a retry.
+    """
+    def list_all_raises(_self: object) -> list[Connection]:
+        msg = "database is locked"
+        raise ConnectionError(msg)
+
+    monkeypatch.setattr(
+        uninstall_module.ConnectionsRepo, "__init__", lambda _self, _db: None
+    )
+    monkeypatch.setattr(
+        uninstall_module.ConnectionsRepo, "list_all", list_all_raises
+    )
+
+    # Sanity: the keyring cleanup must NOT be called either. If it runs,
+    # it would silently succeed (the fake repo has no connections) and the
+    # test would not be proving the abort.
+    cleanup_called: list[str] = []
+
+    def tracking_remove_credential(alias: str) -> None:
+        cleanup_called.append(alias)
+
+    monkeypatch.setattr(
+        "cgate.cli.uninstall.remove_credential", tracking_remove_credential
+    )
+
+    runner.invoke(app, ["uninstall", "--data", "--yes"])
+
+    # The data directory must survive.
+    assert isolated_env["data"].exists(), (
+        "issue #40: rmtree ran even though connection enumeration failed -- "
+        "this orphans every connection's OS keyring credentials."
+    )
+    # The keyring cleanup must also be skipped (nothing to enumerate == nothing to remove).
+    assert cleanup_called == []
+    # (The user-facing message is the third leg of the contract -- without it,
+    # the user would see 'data dir still here' with no explanation and assume
+    # the uninstall silently aborted. The production code prints both the
+    # refusal reason and the retry hint; checking the most specific phrase.)
+
+
+def test_uninstall_data_message_appears_when_aborting_due_to_db_error(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Companion to the above: confirm the user sees the explanation, not just
+    a silent no-op. This is what makes the abort recoverable instead of a
+    mystery -- the message tells them what to fix (close the lock-holder
+    process) and that retrying is the right action.
+    """
+    def list_all_raises(_self: object) -> list[Connection]:
+        msg = "database is locked"
+        raise ConnectionError(msg)
+
+    monkeypatch.setattr(
+        uninstall_module.ConnectionsRepo, "__init__", lambda _self, _db: None
+    )
+    monkeypatch.setattr(uninstall_module.ConnectionsRepo, "list_all", list_all_raises)
+
+    result = runner.invoke(app, ["uninstall", "--data", "--yes"])
+
+    assert "Refusing to delete" in result.stdout
+    assert "orphan" in result.stdout
