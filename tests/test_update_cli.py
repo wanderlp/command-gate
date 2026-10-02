@@ -7,6 +7,7 @@ import sys
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from cgate.cli.main import app
@@ -15,8 +16,6 @@ from cgate.update import Asset, Release
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 _DETACHED_PROCESS = 0x00000008
 _CREATE_NO_WINDOW = 0x08000000
@@ -63,31 +62,29 @@ def test_spawn_delayed_swap_quotes_paths_with_spaces_on_windows(
     assert '"C:\\Program Files\\cgate\\cgate.exe"' in cmd_line
 
 
-def test_spawn_delayed_swap_quotes_paths_with_embedded_double_quotes(
+def test_spawn_delayed_swap_rejects_paths_with_embedded_double_quotes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue #44: a path containing a literal ``"`` character would
-    previously terminate the surrounding ``cmd.exe /c "..."`` quoted
-    region early and expose the rest of the path as a separate token
-    (which, combined with embedded ``&`` or ``|``, would let an extra
-    command slip in). ``list2cmdline`` escapes embedded quotes as ``\\"``
-    so the surrounding region stays intact and cmd.exe sees the whole
-    path as one argument.
+    """issue #44: a path containing a literal ``"`` is not just unsafe to
+    interpolate -- ``list2cmdline``'s escaping targets the CommandLineToArgvW
+    convention, not cmd.exe's own quote-toggle parser, so a path with a
+    *balanced pair* of embedded quotes can re-open cmd.exe's metacharacter
+    interpretation and inject a command past the intended ``move``/``del``.
+
+    ``"`` is not a legal Windows path character, so ``staging``/``target``
+    can never legitimately contain one; the function must refuse to build
+    the command rather than silently emit a string that looks safe but
+    isn't.
     """
     monkeypatch.setattr(sys, "platform", "win32")
 
     staging = r'C:\evil"staging.exe'
     target = r'C:\target dir\evil"target.exe'
 
-    with patch("subprocess.Popen") as popen:
-        ok = _spawn_delayed_swap(staging, target)
+    with patch("subprocess.Popen") as popen, pytest.raises(ValueError, match='"'):
+        _spawn_delayed_swap(staging, target)
 
-    assert ok is True
-    cmd_line = popen.call_args.args[0]
-    # The embedded " must be escaped as \\", not left raw -- a raw " would
-    # close the surrounding quoted region early.
-    assert r'C:\evil\"staging.exe' in cmd_line
-    assert r'C:\target dir\evil\"target.exe' in cmd_line
+    popen.assert_not_called()
 
 
 def test_spawn_delayed_swap_uses_mv_on_non_windows(monkeypatch: pytest.MonkeyPatch) -> None:

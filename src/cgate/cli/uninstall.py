@@ -398,9 +398,24 @@ def _spawn_delayed_delete(target: Path) -> bool:
     (process exited) by the time ``del`` runs.
 
     The path argument is routed through ``subprocess.list2cmdline`` so a
-    path containing spaces, embedded double quotes, or backslash-quote
-    sequences cannot break out of the argument (issue #44).
+    path containing spaces cannot break out of the argument (issue #44).
+    This does NOT protect against an embedded ``"``: cmd.exe parses its
+    own command line with simple quote-toggle rules (unrelated to the
+    CommandLineToArgvW convention ``list2cmdline`` targets), so a path
+    with a balanced pair of embedded quotes can re-open cmd.exe's
+    metacharacter interpretation and inject a command. ``"`` is not a
+    legal character in a Windows path, so ``target`` can never
+    legitimately contain one -- the guard below turns that invariant
+    into an enforced precondition instead of an assumption.
     """
+    if '"' in str(target):
+        msg = (
+            "target path contains a literal '\"', which is not a legal "
+            "Windows path character and which list2cmdline's escaping "
+            "cannot make safe against cmd.exe's own parser -- refusing to "
+            "build the delete command"
+        )
+        raise ValueError(msg)
     try:
         del_part = subprocess.list2cmdline(["del", "/F", "/Q", str(target)])
         cmd_str = f"ping -n 5 127.0.0.1 > nul & {del_part}"

@@ -535,19 +535,23 @@ def test_spawn_delayed_delete_quotes_target_with_spaces_on_windows(
     assert r'"C:\Program Files\cgate\cgate.exe"' in cmd_line
 
 
-def test_spawn_delayed_delete_quotes_target_with_embedded_quotes(
+def test_spawn_delayed_delete_rejects_target_with_embedded_quotes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """issue #44: embedded ``"`` in the path must be escaped, otherwise it
-    closes the surrounding ``cmd.exe /c "..."`` quoted region early and
-    exposes the rest of the path as a separate token.
+    """issue #44: a target containing a literal ``"`` is not just unsafe to
+    interpolate -- ``list2cmdline``'s escaping targets the CommandLineToArgvW
+    convention, not cmd.exe's own quote-toggle parser, so a path with a
+    *balanced pair* of embedded quotes can re-open cmd.exe's metacharacter
+    interpretation and inject a command past the intended ``del``.
+
+    ``"`` is not a legal Windows path character, so ``target`` can never
+    legitimately contain one; the function must refuse to build the
+    command rather than silently emit a string that looks safe but isn't.
     """
     monkeypatch.setattr(sys, "platform", "win32")
     target = Path(r'C:\evil"target.exe')
 
-    with patch("subprocess.Popen") as popen:
-        ok = _spawn_delayed_delete(target)
+    with patch("subprocess.Popen") as popen, pytest.raises(ValueError, match='"'):
+        _spawn_delayed_delete(target)
 
-    assert ok is True
-    cmd_line = popen.call_args.args[0]
-    assert r'C:\evil\"target.exe' in cmd_line
+    popen.assert_not_called()

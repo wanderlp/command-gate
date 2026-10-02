@@ -470,20 +470,36 @@ def _spawn_delayed_swap(staging, target) -> bool:
     POSIX: ``mv -f`` via start_new_session, no delay needed since there
     is no self-lock.
 
-    The path arguments are routed through ``subprocess.list2cmdline`` so
-    a path containing spaces, embedded double quotes, or backslash-quote
-    sequences cannot break out of the argument (issue #44). The fixed
-    ``ping``, the ``> nul`` redirection, the ``&`` chain operator, and
-    the ``move /Y`` / ``del /F /Q`` invocations are literal -- they
-    contain no user-controlled data and cannot smuggle a metacharacter.
+    The path arguments are routed through ``subprocess.list2cmdline`` so a
+    path containing spaces cannot break out of the argument (issue #44).
+    This does NOT protect against an embedded ``"``: cmd.exe parses its
+    own command line with simple quote-toggle rules (unrelated to the
+    CommandLineToArgvW convention ``list2cmdline`` targets), so a path
+    with a balanced pair of embedded quotes can re-open cmd.exe's
+    metacharacter interpretation and inject a command. ``"`` is not a
+    legal character in a Windows path, so ``staging``/``target`` can
+    never legitimately contain one -- the guard below turns that
+    invariant into an enforced precondition instead of an assumption.
+    The fixed ``ping``, the ``> nul`` redirection, the ``&`` chain
+    operator, and the ``move /Y`` / ``del /F /Q`` invocations are
+    literal -- they contain no user-controlled data and cannot smuggle a
+    metacharacter.
     """
     try:
         if sys.platform == "win32":
+            if '"' in str(staging) or '"' in str(target):
+                msg = (
+                    "staging/target path contains a literal '\"', which is not a "
+                    "legal Windows path character and which list2cmdline's "
+                    "escaping cannot make safe against cmd.exe's own parser -- "
+                    "refusing to build the move command"
+                )
+                raise ValueError(msg)
             # cmd.exe is the cleanest available process to do a move on
             # Windows. ``ping`` with -n 5 sends 4 pings (about 3-4s) and
             # exits 0; ``&`` chains commands. The ``move`` invocation's
-            # path arguments come through ``list2cmdline`` so spaces and
-            # embedded quotes in a path do not break the argument.
+            # path arguments come through ``list2cmdline`` so spaces in a
+            # path do not break the argument.
             move_part = subprocess.list2cmdline(
                 ["move", "/Y", str(staging), str(target)]
             )
