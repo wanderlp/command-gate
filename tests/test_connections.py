@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
 
-EXPECTED_SCHEMA_VERSION = 2
+EXPECTED_SCHEMA_VERSION = 3  # bumped for issues #36/#38: EXECUTING status + claimed_at
 
 
 class FakeKeyring(KeyringBackend):

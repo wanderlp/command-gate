@@ -200,9 +200,24 @@ def test_count_waiting_excludes_active_one(repos: Repos) -> None:
 
 
 def test_pending_commands_in_batch_filters_terminal(repos: Repos) -> None:
+    """Every terminal status filters out; EXECUTING (non-terminal, #36/#38) does too.
+
+    ``pending_commands_in_batch`` is the human-decision queue --
+    PENDING only. Both terminal statuses (REJECTED, EXECUTED, FAILED) and
+    transient-but-decided statuses (APPROVED, EXECUTING) must filter out.
+    """
     lot = _batch(repos)
     commands = [_command(repos, batch_id=lot.id, command=str(index)) for index in range(5)]
-    for cmd, status in zip(commands[1:], list(CommandStatus)[1:], strict=True):
+    # One of each terminal + the new EXECUTING state -- the new
+    # transient non-PENDING status added by #36/#38 must also be excluded
+    # from the human-decision queue.
+    statuses = [
+        CommandStatus.REJECTED,
+        CommandStatus.EXECUTED,
+        CommandStatus.FAILED,
+        CommandStatus.EXECUTING,
+    ]
+    for cmd, status in zip(commands[1:], statuses, strict=True):
         repos.commands.update_status(cmd.id, status=status)
 
     pending = pending_commands_in_batch(repos.commands.list_for_batch(lot.id))

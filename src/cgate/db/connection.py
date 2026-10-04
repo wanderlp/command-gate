@@ -111,6 +111,61 @@ def _ensure_column(conn: sqlite3.Connection, *, table: str, column: str, sql_typ
         _ = conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
+def _widen_commands_status_check_if_needed(conn: sqlite3.Connection) -> None:
+    """Recreate the commands table to add ``executing`` to its status CHECK, once.
+
+    Schema v3 (issues #36/#38) introduces the EXECUTING status. SQLite has
+    no ``ALTER TABLE ... ALTER CHECK`` -- the only way to widen a CHECK
+    constraint is to recreate the table, following the standard SQLite
+    pattern (CREATE TABLE new / INSERT FROM old / RENAME new -> old).
+    Foreign keys are suspended for the duration so the temporary table
+    rename does not break FK enforcement on readers.
+
+    Idempotent: the existing CREATE TABLE statement is inspected first;
+    if it already names ``'executing'`` (fresh install, or a DB that
+    previously went through this migration), the function is a no-op.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'commands'"
+    ).fetchone()
+    if row is not None and "'executing'" in str(row["sql"]):
+        return
+    _ = conn.executescript(
+        """
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE commands_new (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES batches(id),
+            position INTEGER NOT NULL,
+            server_alias TEXT NOT NULL,
+            server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),
+            command TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('pending', 'approved', 'rejected', 'executing', 'executed', 'failed')
+            ),
+            result TEXT,
+            approved_by TEXT,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            claimed_at TEXT,
+            UNIQUE (batch_id, position)
+        );
+        INSERT INTO commands_new
+            (id, batch_id, position, server_alias, server_type, command,
+             status, result, approved_by, created_at, resolved_at, claimed_at)
+        SELECT
+            id, batch_id, position, server_alias, server_type, command,
+            status, result, approved_by, created_at, resolved_at, NULL
+        FROM commands;
+        DROP TABLE commands;
+        ALTER TABLE commands_new RENAME TO commands;
+        CREATE INDEX IF NOT EXISTS idx_commands_batch_id ON commands(batch_id);
+        CREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status);
+        PRAGMA foreign_keys = ON;
+        """
+    )
+
+
 def init_database(database: Database) -> None:
     """Create parent dirs (if needed) and apply the schema; idempotent.
 
@@ -130,8 +185,10 @@ def init_database(database: Database) -> None:
     with connect(database) as conn:
         _ = conn.executescript(SCHEMA_SQL)
         _ = conn.executescript(_MODE_SETTINGS_SQL)
+        _widen_commands_status_check_if_needed(conn)
         _ensure_column(conn, table="commands", column="reason", sql_type="TEXT")
         _ensure_column(conn, table="commands", column="risk_label", sql_type="TEXT")
+        _ensure_column(conn, table="commands", column="claimed_at", sql_type="TEXT")
         applied_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         _ = conn.execute(
             "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",

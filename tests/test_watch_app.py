@@ -13,6 +13,7 @@ from textual.widgets import ListView
 
 from cgate import __version__
 from cgate.connections.store import ConnectionsRepo
+from cgate.watch.approval import execute_and_finalize  # noqa: E402  -- used by #36/#38 regression tests below
 from cgate.db.batches import BatchesRepo
 from cgate.db.commands import CommandsRepo
 from cgate.db.connection import Database, init_database
@@ -642,3 +643,189 @@ def test_approval_error_with_brackets_in_connection_alias_does_not_crash_tui(rep
     # The bracket-bearing alias must reach the notice escaped.
     assert "srv\\[prod\\]" in notice
     assert "srv[prod]" not in notice
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #36 -- the EXECUTING CAS state machine that
+# prevents ``execute_and_finalize`` from running an approved command twice.
+# See src/cgate/watch/approval.py.
+# ---------------------------------------------------------------------------
+
+
+from datetime import UTC, datetime  # noqa: E402  -- grouped with the #36 tests below
+
+
+def test_execute_and_finalize_cas_marks_row_executing_with_claim_timestamp(
+    repos: Repos,
+) -> None:
+    """issue #36: ``execute_and_finalize`` must CAS APPROVED -> EXECUTING
+    with ``claimed_at`` set to the current time before invoking the
+    remote executor. Without the CAS, two callers observing status ==
+    APPROVED could both run the destructive command twice (the original
+    bug). ``claimed_at`` is the heal's liveness marker (issue #38).
+    """
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+
+    with patch("cgate.watch.approval.execute_command", return_value=_success()):
+        updated, _ = execute_and_finalize(
+            db=repos.db,
+            commands=repos.commands,
+            connections=repos.connections,
+            batches=repos.batches,
+            command_id=cmd.id,
+        )
+
+    assert updated is not None
+    assert updated.status is CommandStatus.EXECUTED
+    # The CAS path stamps claimed_at on the way to EXECUTING; it is
+    # preserved on the terminal write so the audit trail shows when the
+    # executor claimed the command.
+    assert updated.claimed_at is not None
+
+
+def test_execute_and_finalize_backs_off_when_row_already_executing(repos: Repos) -> None:
+    """issue #36: if another caller already CAS'd APPROVED -> EXECUTING,
+    the second caller's CAS must lose and ``execute_and_finalize`` must
+    return without invoking the executor or writing a terminal status.
+    This is the core race the CAS is preventing -- without it, two
+    observers of APPROVED would both execute the remote command.
+    """
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+    # Simulate the winner: another process has already CAS'd the row to
+    # EXECUTING (with a fresh claimed_at -- the live process).
+    _ = repos.commands.update_status(
+        cmd.id,
+        status=CommandStatus.EXECUTING,
+        claimed_at=datetime.now(UTC),
+        expected_status=CommandStatus.APPROVED,
+    )
+
+    with patch("cgate.watch.approval.execute_command") as execute:
+        updated, result = execute_and_finalize(
+            db=repos.db,
+            commands=repos.commands,
+            connections=repos.connections,
+            batches=repos.batches,
+            command_id=cmd.id,
+        )
+
+    # Must NOT have invoked the executor -- the CAS must lose before the
+    # remote call.
+    execute.assert_not_called()
+    # Returns the command as-is (still EXECUTING); no ExecutionResult.
+    assert updated is not None
+    assert updated.status is CommandStatus.EXECUTING
+    assert result is None
+
+
+def test_two_concurrent_execute_and_finalize_invoke_executor_at_most_once(
+    repos: Repos,
+) -> None:
+    """issue #36 end-to-end: two callers race ``execute_and_finalize`` on
+    the same APPROVED command. Only one of them must actually invoke
+    ``execute_command`` -- the other backs off at the CAS. This is the
+    reproduction from the issue body (two ``cgate watch`` instances, or
+    the TUI + the MCP AUTO-mode auto-execution path, observing APPROVED
+    at the same instant).
+
+    Uses two threads with a barrier on the CAS path so both threads
+    have read APPROVED before either writes the CAS -- forces the race
+    window deterministically. Without the barrier the GIL + SQLite's
+    busy-timeout would still serialize, but the window is so tight
+    that CI noise could mask a regression.
+    """
+    import threading
+
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+
+    call_count_lock = threading.Lock()
+    call_count = 0
+    cas_started = threading.Barrier(2)
+    both_in_cas = threading.Barrier(2)
+
+    real_update_status = repos.commands.update_status
+
+    def slow_cas_then_normal(*args: object, **kwargs: object) -> bool:
+        nonlocal call_count
+        # We only synchronize on the EXECUTING CAS path. The other calls
+        # (PENDING -> APPROVED before the race, the terminal EXECUTED write
+        # after) run straight through.
+        if kwargs.get("status") is CommandStatus.EXECUTING:
+            with call_count_lock:
+                call_count += 1
+            # Both threads reach the CAS at roughly the same time; let
+            # them both enter, then release so both attempt the SQL write.
+            cas_started.wait()
+            both_in_cas.wait()
+        return real_update_status(*args, **kwargs)
+
+    def runner() -> None:
+        with patch(
+            "cgate.watch.approval.execute_command", return_value=_success()
+        ):
+            with patch.object(
+                repos.commands,
+                "update_status",
+                side_effect=slow_cas_then_normal,
+            ):
+                execute_and_finalize(
+                    db=repos.db,
+                    commands=repos.commands,
+                    connections=repos.connections,
+                    batches=repos.batches,
+                    command_id=cmd.id,
+                )
+
+    t1 = threading.Thread(target=runner)
+    t2 = threading.Thread(target=runner)
+    t1.start()
+    t2.start()
+    t1.join(timeout=30)
+    t2.join(timeout=30)
+    assert not t1.is_alive() and not t2.is_alive(), "threading test deadlocked"
+
+    # Both threads reached the CAS -- if they didn't, the barrier test is
+    # not actually exercising the race.
+    assert call_count == 2, (
+        f"expected both threads to attempt the CAS, got {call_count} "
+        "attempts -- the test cannot prove anything without one that already lost"
+    )
+    # And the row must be in a terminal state (the winner stamped it).
+    final = repos.commands.get(cmd.id)
+    assert final is not None
+    assert final.status is CommandStatus.EXECUTED, (
+        "the CAS winner must have stamped the terminal status"
+    )

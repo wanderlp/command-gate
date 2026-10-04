@@ -82,6 +82,7 @@ def row_to_command(row: sqlite3.Row) -> Command:
         approved_by=col_opt_str(row, "approved_by"),
         created_at=parse(col_str(row, "created_at")),
         resolved_at=col_opt_dt(row, "resolved_at"),
+        claimed_at=col_opt_dt(row, "claimed_at"),
         reason=col_opt_str(row, "reason"),
         risk_label=col_opt_str(row, "risk_label"),
     )

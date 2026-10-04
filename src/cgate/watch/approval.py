@@ -99,6 +99,17 @@ def execute_and_finalize(  # noqa: PLR0913 - signature follows the required repo
     that can take up to `timeout`. No-ops (returns the command as-is, no
     ExecutionResult) if it isn't APPROVED -- `mark_approved` lost a race,
     or a human rejected it in the gap between the two calls.
+
+    Issue #36: a plain ``status == APPROVED`` check is racy -- two
+    `cgate watch` instances, or the TUI's manual approval and the MCP
+    AUTO-mode auto-execution path, can both observe APPROVED and both
+    call ``execute_command`` against the remote server, running a
+    destructive command twice. The fix is the two-step CAS below: only
+    the caller that wins ``APPROVED -> EXECUTING`` actually executes.
+
+    Issue #38: ``EXECUTING`` is the heal's "this process is live" marker.
+    The CAS stamps ``claimed_at`` so the heal can tell a process that
+    is mid-execution from one whose process died mid-execution.
     """
     del db
     command = commands.get(command_id)
@@ -108,17 +119,39 @@ def execute_and_finalize(  # noqa: PLR0913 - signature follows the required repo
     if connection is None:
         raise ConnectionNotFoundError(command.server_alias)
     approver = command.approved_by or _approve_by()
+
+    # CAS APPROVED -> EXECUTING. If we lose this CAS, another caller has
+    # claimed this command and is already running execute_command; we
+    # back off without executing and without stamping a terminal status.
+    # The winner's terminal write (below) also uses expected_status so a
+    # slow loser cannot clobber the winner's row.
+    claimed = commands.update_status(
+        command_id,
+        status=CommandStatus.EXECUTING,
+        approved_by=approver,
+        expected_status=CommandStatus.APPROVED,
+    )
+    if not claimed:
+        refreshed = commands.get(command_id)
+        return refreshed if refreshed is not None else command, None
+
     result = execute_command(connection, command.command, timeout=timeout)
     status = CommandStatus.EXECUTED if result.ok else CommandStatus.FAILED
     output = result.stdout
     if result.stderr:
         separator = "\n" if output else ""
         output = f"{output}{separator}--- stderr ---\n{result.stderr}"
+
+    # CAS EXECUTING -> terminal. The expected_status guard prevents our
+    # terminal write from clobbering a row that the startup heal has
+    # already marked FAILED (a process that died mid-execution and the
+    # heal running on next launch can both target the same row).
     _ = commands.update_status(
         command_id,
         status=status,
         approved_by=approver,
         result=output,
+        expected_status=CommandStatus.EXECUTING,
     )
     updated = commands.get(command_id)
     if updated is None:

@@ -29,6 +29,7 @@ def _command(  # noqa: PLR0913 - one param per Command field under test, all opt
     reason: str | None = None,
     risk_label: str | None = None,
     command: str = "uptime",
+    claimed_at: datetime | None = None,
 ) -> Command:
     return Command(
         id=CommandId("c1"),
@@ -42,6 +43,7 @@ def _command(  # noqa: PLR0913 - one param per Command field under test, all opt
         approved_by=approved_by,
         created_at=_NOW,
         resolved_at=None,
+        claimed_at=claimed_at,
         reason=reason,
         risk_label=risk_label,
     )

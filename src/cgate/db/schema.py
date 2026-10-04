@@ -5,7 +5,7 @@ Designed to migrate to SQL Server in Phase 2 with the same columns.
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -30,12 +30,13 @@ CREATE TABLE IF NOT EXISTS commands (
     server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),
     command TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
-        status IN ('pending', 'approved', 'rejected', 'executed', 'failed')
+        status IN ('pending', 'approved', 'rejected', 'executing', 'executed', 'failed')
     ),
     result TEXT,
     approved_by TEXT,
     created_at TEXT NOT NULL,
     resolved_at TEXT,
+    claimed_at TEXT,
     UNIQUE (batch_id, position)
 );
 
