@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cgate.db.commands import all_terminal
@@ -78,15 +79,31 @@ def resolve_stale_batches(batches: BatchesRepo, commands: CommandsRepo) -> None:
             batches.mark_resolved(batch.id)
 
 
-def fail_orphaned_approvals(commands: CommandsRepo) -> None:
-    """Fail any command left `APPROVED` by a process that died mid-execution.
+def fail_orphaned_approvals(
+    commands: CommandsRepo,
+    *,
+    stuck_threshold_seconds: int = 120,
+) -> None:
+    """Mark commands orphaned by a crashed executor.
 
-    Approval runs synchronously end-to-end in one call: mark APPROVED, run
-    the command, stamp EXECUTED/FAILED. A command still APPROVED means that
-    call never got to finish -- it can never reach a terminal status on its
-    own, which keeps its batch stuck exactly like the `resolved_at` gap
-    `resolve_stale_batches` sweeps up.
+    Two flavors of orphan, distinguishable by the executor's CAS claim
+    (issue #38):
+
+    - ``APPROVED`` with no ``claimed_at``: the process died between
+      ``mark_approved`` and the CAS to ``EXECUTING`` -- the executor never
+      started. Always an orphan.
+
+    - ``EXECUTING`` with stale ``claimed_at`` (older than
+      ``stuck_threshold_seconds``): the process claimed the command, ran
+      into the network call, and then died. We recover here too so the
+      batch does not sit stuck in EXECUTING forever.
+
+    Live ``EXECUTING`` commands -- fresh ``claimed_at`` -- are left alone.
+    Without this distinction, ``cgate watch`` starting on a machine that
+    is still running an AUTO-mode executor would mark that executor's
+    in-flight commands FAILED and clobber their audit trail (issue #38).
     """
+    now = datetime.now(UTC)
     for command in commands.list_by_status(CommandStatus.APPROVED):
         _ = commands.update_status(
             command.id,
@@ -95,6 +112,35 @@ def fail_orphaned_approvals(commands: CommandsRepo) -> None:
             result="interrupted before completion (cgate restarted mid-execution)",
             expected_status=CommandStatus.APPROVED,
         )
+    for command in commands.list_by_status(CommandStatus.EXECUTING):
+        if command.claimed_at is None:
+            # Defensive: should not happen -- the executor CAS stamps
+            # claimed_at on the way to EXECUTING. If a manual SQL edit
+            # (or a bug in a future change) left this, treat as stuck.
+            _ = commands.update_status(
+                command.id,
+                status=CommandStatus.FAILED,
+                approved_by=command.approved_by,
+                result=(
+                    "interrupted before completion "
+                    "(EXECUTING with no claimed_at)"
+                ),
+                expected_status=CommandStatus.EXECUTING,
+            )
+            continue
+        age = (now - command.claimed_at).total_seconds()
+        if age > stuck_threshold_seconds:
+            _ = commands.update_status(
+                command.id,
+                status=CommandStatus.FAILED,
+                approved_by=command.approved_by,
+                result=(
+                    f"interrupted before completion "
+                    f"(claimed_at {age:.0f}s old, threshold "
+                    f"{stuck_threshold_seconds}s)"
+                ),
+                expected_status=CommandStatus.EXECUTING,
+            )
 
 
 def heal_queue(batches: BatchesRepo, commands: CommandsRepo) -> None:

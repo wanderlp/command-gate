@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -13,7 +14,6 @@ from textual.widgets import ListView
 
 from cgate import __version__
 from cgate.connections.store import ConnectionsRepo
-from cgate.watch.approval import execute_and_finalize  # noqa: E402  -- used by #36/#38 regression tests below
 from cgate.db.batches import BatchesRepo
 from cgate.db.commands import CommandsRepo
 from cgate.db.connection import Database, init_database
@@ -22,7 +22,9 @@ from cgate.db.server_settings import ServerSettingsRepo
 from cgate.db.types import CommandStatus, ServerType
 from cgate.executor.base import ExecutionResult
 from cgate.watch.app import ActivePanel, QueueSidebar, ServersSidebar, WatchApp
+from cgate.watch.approval import execute_and_finalize
 from cgate.watch.command_detail_modal import CommandDetailModal
+from cgate.watch.queue import fail_orphaned_approvals
 from cgate.watch.widgets import CommandRow
 
 if TYPE_CHECKING:
@@ -652,7 +654,7 @@ def test_approval_error_with_brackets_in_connection_alias_does_not_crash_tui(rep
 # ---------------------------------------------------------------------------
 
 
-from datetime import UTC, datetime  # noqa: E402  -- grouped with the #36 tests below
+from datetime import UTC, datetime, timedelta  # noqa: E402  -- grouped with the #36/#38 tests below
 
 
 def test_execute_and_finalize_cas_marks_row_executing_with_claim_timestamp(
@@ -756,8 +758,7 @@ def test_two_concurrent_execute_and_finalize_invoke_executor_at_most_once(
     busy-timeout would still serialize, but the window is so tight
     that CI noise could mask a regression.
     """
-    import threading
-
+    threads_per_test = 2
     lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
     cmd = repos.commands.add(
         batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
@@ -773,8 +774,8 @@ def test_two_concurrent_execute_and_finalize_invoke_executor_at_most_once(
 
     call_count_lock = threading.Lock()
     call_count = 0
-    cas_started = threading.Barrier(2)
-    both_in_cas = threading.Barrier(2)
+    cas_started = threading.Barrier(threads_per_test)
+    both_in_cas = threading.Barrier(threads_per_test)
 
     real_update_status = repos.commands.update_status
 
@@ -793,33 +794,33 @@ def test_two_concurrent_execute_and_finalize_invoke_executor_at_most_once(
         return real_update_status(*args, **kwargs)
 
     def runner() -> None:
-        with patch(
-            "cgate.watch.approval.execute_command", return_value=_success()
-        ):
-            with patch.object(
+        with (
+            patch("cgate.watch.approval.execute_command", return_value=_success()),
+            patch.object(
                 repos.commands,
                 "update_status",
                 side_effect=slow_cas_then_normal,
-            ):
-                execute_and_finalize(
-                    db=repos.db,
-                    commands=repos.commands,
-                    connections=repos.connections,
+            ),
+        ):
+            execute_and_finalize(
+                db=repos.db,
+                commands=repos.commands,
+                connections=repos.connections,
                     batches=repos.batches,
                     command_id=cmd.id,
                 )
 
-    t1 = threading.Thread(target=runner)
-    t2 = threading.Thread(target=runner)
-    t1.start()
-    t2.start()
-    t1.join(timeout=30)
-    t2.join(timeout=30)
-    assert not t1.is_alive() and not t2.is_alive(), "threading test deadlocked"
+    threads = [threading.Thread(target=runner) for _ in range(threads_per_test)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    for index, thread in enumerate(threads, start=1):
+        assert not thread.is_alive(), f"thread {index} deadlocked"
 
     # Both threads reached the CAS -- if they didn't, the barrier test is
     # not actually exercising the race.
-    assert call_count == 2, (
+    assert call_count == threads_per_test, (
         f"expected both threads to attempt the CAS, got {call_count} "
         "attempts -- the test cannot prove anything without one that already lost"
     )
@@ -829,3 +830,210 @@ def test_two_concurrent_execute_and_finalize_invoke_executor_at_most_once(
     assert final.status is CommandStatus.EXECUTED, (
         "the CAS winner must have stamped the terminal status"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #38 -- the heal distinguishes live EXECUTING
+# commands (process mid-call, fresh claimed_at) from dead ones
+# (process died mid-call, stale claimed_at). The mixed test below
+# (#38 follow-up) also verifies the executor's terminal write uses
+# expected_status=EXECUTING so the heal's FAILED stamp survives a late
+# result from the original (zombie) executor.
+# See src/cgate/watch/queue.py and src/cgate/watch/approval.py.
+# ---------------------------------------------------------------------------
+
+
+def test_executor_terminal_write_is_a_noop_when_heal_already_marked_failed(
+    repos: Repos,
+) -> None:
+    """issue #38 follow-up: the heal marks a stuck EXECUTING command
+    FAILED on the next launch. If the original executor's network call
+    later returns successfully and tries to stamp EXECUTED, that write
+    must lose the CAS (because status is no longer EXECUTING -- it is
+    FAILED from the heal). Without the CAS guard, the heal's FAILED
+    stamp would be overwritten with EXECUTED, hiding the crash from the
+    audit trail.
+    """
+
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+    # Process claims EXECUTING with a stale claim, then dies.
+    _ = repos.commands.update_status(
+        cmd.id,
+        status=CommandStatus.EXECUTING,
+        claimed_at=datetime.now(UTC) - timedelta(hours=1),
+        expected_status=CommandStatus.APPROVED,
+    )
+
+    # Heal runs on the next launch and marks the orphan FAILED.
+    fail_orphaned_approvals(repos.commands)
+    after_heal = repos.commands.get(cmd.id)
+    assert after_heal is not None
+    assert after_heal.status is CommandStatus.FAILED
+
+    # The original (zombie) executor's network call now returns and
+    # tries to write the success result. The CAS must lose.
+    with patch("cgate.watch.approval.execute_command", return_value=_success()):
+        updated, _ = execute_and_finalize(
+            db=repos.db,
+            commands=repos.commands,
+            connections=repos.connections,
+            batches=repos.batches,
+            command_id=cmd.id,
+        )
+
+    # Status remains FAILED -- the heal's stamp survives. The executor
+    # returns the (now stale) command unchanged.
+    final = repos.commands.get(cmd.id)
+    assert final is not None
+    assert final.status is CommandStatus.FAILED, (
+        "the executor's terminal write clobbered the heal's FAILED stamp -- "
+        "the CAS guard on EXECUTING -> terminal must hold"
+    )
+    assert updated is not None
+    assert updated.status is CommandStatus.FAILED
+
+
+def test_heal_leaves_live_executing_command_alone(repos: Repos) -> None:
+    """issue #38 core: a row in EXECUTING with a fresh claimed_at is a
+    live executor process mid-call. The heal must NOT touch it. The
+    pre-fix code would mark it FAILED and clobber the audit trail while
+    the executor was still running.
+    """
+
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+    # Live process: claimed just now, presumably mid-execute_command call.
+    _ = repos.commands.update_status(
+        cmd.id,
+        status=CommandStatus.EXECUTING,
+        claimed_at=datetime.now(UTC),
+        expected_status=CommandStatus.APPROVED,
+    )
+
+    fail_orphaned_approvals(repos.commands)
+
+    after = repos.commands.get(cmd.id)
+    assert after is not None
+    assert after.status is CommandStatus.EXECUTING, (
+        "heal marked a live EXECUTING command FAILED -- "
+        "this is exactly what issue #38 says must not happen"
+    )
+    assert after.claimed_at is not None
+
+
+def test_heal_marks_stuck_executing_command_failed(repos: Repos) -> None:
+    """issue #38: a row in EXECUTING with a stale claimed_at means the
+    executor process died mid-call. The heal must mark it FAILED so the
+    batch does not sit stuck in EXECUTING forever.
+    """
+
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    # Go through the proper state transitions: PENDING -> APPROVED ->
+    # EXECUTING (with a stale claimed_at to simulate a dead executor).
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+    _ = repos.commands.update_status(
+        cmd.id,
+        status=CommandStatus.EXECUTING,
+        claimed_at=datetime.now(UTC) - timedelta(hours=1),
+        expected_status=CommandStatus.APPROVED,
+    )
+
+    fail_orphaned_approvals(repos.commands)
+
+    after = repos.commands.get(cmd.id)
+    assert after is not None
+    assert after.status is CommandStatus.FAILED
+    assert after.result is not None
+    assert "interrupted before completion" in after.result
+
+
+def test_heal_keeps_existing_approved_behavior(repos: Repos) -> None:
+    """Regression guard for the heal: an APPROVED command (the legacy
+    orphan case the heal always handled) must still be marked FAILED.
+    Adding the EXECUTING branch in #38 must not have regressed the
+    pre-existing APPROVED handling.
+    """
+
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+
+    fail_orphaned_approvals(repos.commands)
+
+    after = repos.commands.get(cmd.id)
+    assert after is not None
+    assert after.status is CommandStatus.FAILED
+    assert "interrupted before completion" in (after.result or "")
+
+
+def test_heal_stuck_threshold_is_configurable(repos: Repos) -> None:
+    """issue #38 follow-up: the stuck threshold must be configurable so
+    operators with legitimately slow remote commands can extend it.
+    Default is 120s; passing a tighter one (e.g. 1s) with a 5-second-old
+    claim must classify the command as stuck.
+    """
+
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+    _ = repos.commands.update_status(
+        cmd.id,
+        status=CommandStatus.EXECUTING,
+        claimed_at=datetime.now(UTC) - timedelta(seconds=5),
+        expected_status=CommandStatus.APPROVED,
+    )
+
+    fail_orphaned_approvals(repos.commands, stuck_threshold_seconds=1)
+
+    after = repos.commands.get(cmd.id)
+    assert after is not None
+    assert after.status is CommandStatus.FAILED
