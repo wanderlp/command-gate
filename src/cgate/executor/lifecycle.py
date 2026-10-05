@@ -17,6 +17,7 @@ What lives here:
 - ``execute_and_finalize``: CAS APPROVED -> EXECUTING -> terminal with
   ``expected_status`` so a zombie executor whose process died mid-call
   cannot clobber the heal's FAILED stamp (see #38 follow-up).
+- ``reject_one``: CAS PENDING -> REJECTED.
 
 The watch app re-exports these names from ``cgate.watch.approval`` for
 backwards compatibility with the rest of the watch app and any
@@ -85,8 +86,8 @@ def mark_approved(
     ``execute_and_finalize``): a plain DB write, done in milliseconds.
     The watch TUI calls this first and refreshes before the slow half, so
     a human sees the "approved, running" state (status glyph ◐) instead
-    of the queue looking frozen while the executor's timeout runs (up
-    to a minute by default).
+    of the queue looking frozen while the executor's timeout runs (up to a
+    minute by default).
 
     Returns the command as-is (still PENDING) if the CAS loses a race
     with another decision on it, or if it's already past PENDING for
@@ -140,6 +141,16 @@ def execute_and_finalize(  # noqa: PLR0913 - signature follows the required repo
     heal's FAILED stamp when its network call eventually returned. This
     is verified end-to-end by
     ``test_executor_terminal_write_is_a_noop_when_heal_already_marked_failed``.
+
+    If the network call itself raises (SSH transport failure, WinRM HTTP
+    error, connection refused, ...), the row would otherwise sit in
+    EXECUTING until the next heal -- and the batch would block the FIFO
+    queue while ``resolve_stale_batches`` waits for every command to
+    terminate. Mark FAILED here with the EXECUTING CAS guard so the row
+    terminates promptly and the audit trail records what happened. We do
+    not re-raise -- the caller gets a clean ``(Command(FAILED), None)``
+    return, so they don't need a second try/except layer to handle the
+    failure path.
     """
     del db
     command = commands.get(command_id)
@@ -160,7 +171,22 @@ def execute_and_finalize(  # noqa: PLR0913 - signature follows the required repo
         refreshed = commands.get(command_id)
         return refreshed if refreshed is not None else command, None
 
-    result = selector.execute_command(connection, command.command, timeout=timeout)
+    try:
+        result = selector.execute_command(connection, command.command, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - the executor surfaces generic Exception subclasses; we want every transport failure here
+        _ = commands.update_status(
+            command_id,
+            status=CommandStatus.FAILED,
+            approved_by=approver,
+            result=f"executor raised: {type(exc).__name__}: {exc}",
+            expected_status=CommandStatus.EXECUTING,
+        )
+        updated = commands.get(command_id)
+        if updated is None:
+            raise CommandDisappearedError(command_id) from exc
+        _maybe_resolve_batch(batches, commands, updated.batch_id)
+        return updated, None
+
     status = CommandStatus.EXECUTED if result.ok else CommandStatus.FAILED
     output = result.stdout
     if result.stderr:
@@ -307,4 +333,3 @@ __all__ = [
     "reject_one",
     "reject_remaining",
 ]
-

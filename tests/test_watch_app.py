@@ -904,6 +904,60 @@ def test_executor_terminal_write_is_a_noop_when_heal_already_marked_failed(
     assert updated.status is CommandStatus.FAILED
 
 
+def test_executor_exception_marks_command_failed_with_expected_status_guard(
+    repos: Repos,
+) -> None:
+    """issue #36 follow-up #4: if ``execute_command`` raises (SSH
+    transport failure, WinRM HTTP error, connection refused, ...), the row
+    would otherwise sit in ``EXECUTING`` until the next heal -- and the
+    batch would block the FIFO queue while ``resolve_stale_batches`` waits
+    for every command to terminate. ``execute_and_finalize`` must catch
+    the exception, mark FAILED with the ``expected_status=EXECUTING``
+    CAS guard, and return cleanly (no re-raise) so the caller doesn't
+    need a second try/except layer to handle the failure path.
+    """
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+
+    class FakeConnectionError(RuntimeError):
+        """Stand-in for SSH / WinRM transport failures the executor surfaces."""
+
+    def fake_execute(*_args: object, **_kwargs: object) -> object:
+        raise FakeConnectionError("connection refused")
+
+    with patch("cgate.executor.selector.execute_command", side_effect=fake_execute):
+        updated, result = execute_and_finalize(
+            db=repos.db,
+            commands=repos.commands,
+            connections=repos.connections,
+            batches=repos.batches,
+            command_id=cmd.id,
+        )
+
+    # Must NOT re-raise -- caller gets a clean (Command, None) return.
+    assert result is None
+    assert updated is not None
+    assert updated.status is CommandStatus.FAILED, (
+        "execute_command raised but the row was left in EXECUTING -- "
+        "the batch will sit stuck in the FIFO queue until the next heal."
+    )
+    assert updated.result is not None
+    assert "FakeConnectionError" in updated.result, (
+        "the failure reason should be in the audit trail"
+    )
+    assert "connection refused" in updated.result
+
+
 def test_heal_leaves_live_executing_command_alone(repos: Repos) -> None:
     """issue #38 core: a row in EXECUTING with a fresh claimed_at is a
     live executor process mid-call. The heal must NOT touch it. The
