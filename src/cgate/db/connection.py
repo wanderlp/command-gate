@@ -111,6 +111,11 @@ def _ensure_column(conn: sqlite3.Connection, *, table: str, column: str, sql_typ
         _ = conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
+def _table_columns(conn: sqlite3.Connection, *, table: str) -> list[str]:
+    """Return the column names of a table, in declaration order."""
+    return [str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
 def _widen_commands_status_check_if_needed(conn: sqlite3.Connection) -> None:
     """Recreate the commands table to add ``executing`` to its status CHECK, once.
 
@@ -121,48 +126,116 @@ def _widen_commands_status_check_if_needed(conn: sqlite3.Connection) -> None:
     Foreign keys are suspended for the duration so the temporary table
     rename does not break FK enforcement on readers.
 
-    Idempotent: the existing CREATE TABLE statement is inspected first;
-    if it already names ``'executing'`` (fresh install, or a DB that
-    previously went through this migration), the function is a no-op.
+    Three robustness properties the previous implementation lacked:
+
+    1. **All columns are preserved.** The new ``commands_new`` is declared
+       with the v3 column set including ``reason``, ``risk_label``, and
+       ``claimed_at``. The ``INSERT ... SELECT`` only requests columns
+       that actually exist on the old ``commands`` (looked up via
+       ``PRAGMA table_info``), so a v2 DB that already went through
+       ``_ensure_column`` for ``reason``/``risk_label`` keeps those
+       annotations through the migration. Missing columns on the source
+       side get a SQL ``NULL`` literal in the SELECT list so the column
+       count matches the new-table columns.
+
+    2. **Atomicity.** The whole recreation runs inside one explicit
+       ``BEGIN IMMEDIATE`` ... ``COMMIT``. Without this, a process
+       crashing between ``DROP TABLE commands`` and ``ALTER TABLE ...
+       RENAME`` leaves a half-migrated DB: the next launch's
+       ``CREATE TABLE IF NOT EXISTS`` sees an empty ``commands`` and
+       decides no migration is needed, silently orphaning every row in
+       the not-yet-renamed ``commands_new``. With ``BEGIN IMMEDIATE``
+       the failed half either rolls back or commits -- never halves.
+
+    3. **Preexisting ``commands_new`` is dropped first.** If a previous
+       crashed migration left ``commands_new`` behind, recreating it
+       without dropping first would error on ``table commands_new
+       already exists``. The DROP IF EXISTS at the top of the script
+       clears that.
+
+    Idempotent: a fresh install (CREATE TABLE includes 'executing'
+    from the start) and an already-migrated DB both skip this function.
     """
-    row = conn.execute(
+    existing_sql_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'commands'"
     ).fetchone()
-    if row is not None and "'executing'" in str(row["sql"]):
+    if existing_sql_row is not None and "'executing'" in str(existing_sql_row["sql"]):
         return
+
+    # Columns added via _ensure_column in later patches -- a v2 DB that
+    # ran for any length of time before the v3 migration has these; a
+    # fresh v2 created by an integration test does not. Either way, we
+    # copy them when present.
+    new_columns = [
+        "id",
+        "batch_id",
+        "position",
+        "server_alias",
+        "server_type",
+        "command",
+        "status",
+        "result",
+        "approved_by",
+        "created_at",
+        "resolved_at",
+        "claimed_at",
+        "reason",
+        "risk_label",
+    ]
+    source_columns = _table_columns(conn, table="commands")
+    # Build INSERT columns and SELECT expressions together so their
+    # positions stay aligned. Each new column gets either ``<col>`` (if
+    # the source has it) or ``NULL AS <col>`` (if not) -- the SELECT
+    # list always has exactly as many expressions as the INSERT columns.
+    columns_to_insert: list[str] = []
+    select_expressions: list[str] = []
+    for col in new_columns:
+        columns_to_insert.append(col)
+        if col in source_columns:
+            select_expressions.append(col)
+        else:
+            select_expressions.append(f"NULL AS {col}")
+    insert_list = ", ".join(columns_to_insert)
+    select_list = ", ".join(select_expressions)
+
     _ = conn.executescript(
-        """
-        PRAGMA foreign_keys = OFF;
-        CREATE TABLE commands_new (
-            id TEXT PRIMARY KEY,
-            batch_id TEXT NOT NULL REFERENCES batches(id),
-            position INTEGER NOT NULL,
-            server_alias TEXT NOT NULL,
-            server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),
-            command TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (
-                status IN ('pending', 'approved', 'rejected', 'executing', 'executed', 'failed')
-            ),
-            result TEXT,
-            approved_by TEXT,
-            created_at TEXT NOT NULL,
-            resolved_at TEXT,
-            claimed_at TEXT,
-            UNIQUE (batch_id, position)
-        );
-        INSERT INTO commands_new
-            (id, batch_id, position, server_alias, server_type, command,
-             status, result, approved_by, created_at, resolved_at, claimed_at)
-        SELECT
-            id, batch_id, position, server_alias, server_type, command,
-            status, result, approved_by, created_at, resolved_at, NULL
-        FROM commands;
-        DROP TABLE commands;
-        ALTER TABLE commands_new RENAME TO commands;
-        CREATE INDEX IF NOT EXISTS idx_commands_batch_id ON commands(batch_id);
-        CREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status);
-        PRAGMA foreign_keys = ON;
-        """
+        "BEGIN IMMEDIATE;"  # noqa: S608, ISC003 -- column list comes from a fixed enum of literals; no user input
+        + "\nPRAGMA foreign_keys = OFF;"
+        + "\nDROP TABLE IF EXISTS commands_new;"
+        + "\nCREATE TABLE commands_new ("
+        + "\n    id TEXT PRIMARY KEY,"
+        + "\n    batch_id TEXT NOT NULL REFERENCES batches(id),"
+        + "\n    position INTEGER NOT NULL,"
+        + "\n    server_alias TEXT NOT NULL,"
+        + "\n    server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),"
+        + "\n    command TEXT NOT NULL,"
+        + "\n    status TEXT NOT NULL CHECK ("
+        + (
+            "\n        status IN ('pending', 'approved', "
+            "'rejected', 'executing', 'executed', 'failed')"
+        )
+        + "\n    ),"
+        + "\n    result TEXT,"
+        + "\n    approved_by TEXT,"
+        + "\n    created_at TEXT NOT NULL,"
+        + "\n    resolved_at TEXT,"
+        + "\n    claimed_at TEXT,"
+        + "\n    reason TEXT,"
+        + "\n    risk_label TEXT,"
+        + "\n    UNIQUE (batch_id, position)"
+        + "\n);"
+        + "\nINSERT INTO commands_new ("
+        + insert_list
+        + ")"
+        + "\n    SELECT "
+        + select_list
+        + "\n    FROM commands;"
+        + "\nDROP TABLE commands;"
+        + "\nALTER TABLE commands_new RENAME TO commands;"
+        + "\nCREATE INDEX IF NOT EXISTS idx_commands_batch_id ON commands(batch_id);"
+        + "\nCREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status);"
+        + "\nPRAGMA foreign_keys = ON;"
+        + "\nCOMMIT;"
     )
 
 

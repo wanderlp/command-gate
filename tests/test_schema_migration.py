@@ -18,6 +18,8 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import pytest
+
 from cgate.db.batches import BatchesRepo
 from cgate.db.commands import CommandsRepo
 from cgate.db.connection import Database, connect, init_database
@@ -302,7 +304,7 @@ def test_migrated_db_supports_executing_status(tmp_path: Path) -> None:
         server_type=ServerType.LINUX,
         command="uptime",
     )
-    # Transition through the state machine the migration enables.
+# Transition through the state machine the migration enables.
     assert commands_repo.update_status(cmd.id, status=CommandStatus.APPROVED)
     assert commands_repo.update_status(
         cmd.id,
@@ -313,4 +315,250 @@ def test_migrated_db_supports_executing_status(tmp_path: Path) -> None:
     assert fetched is not None
     assert fetched.status is CommandStatus.EXECUTING
     assert fetched.claimed_at == datetime(2026, 10, 2, tzinfo=UTC)
+
+
+def test_migration_preserves_reason_and_risk_label(tmp_path: Path) -> None:
+    """A v2 DB that has been in production long enough to have gone
+    through ``_ensure_column('reason')`` and ``_ensure_column('risk_label')``
+    has both columns. The v3 migration's ``INSERT ... SELECT`` must
+    preserve them -- the original migration dropped them, which would
+    silently nuke every command annotation in every production install.
+    """
+    db_path = tmp_path / "legacy.db"
+    # Build a v2 DB that has reason + risk_label (simulating an
+    # install that ran the earlier _ensure_column patches).
+    with sqlite3.connect(db_path) as raw:
+        _ = raw.executescript(
+            """
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TABLE batches (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                requested_by_agent TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE TABLE commands (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES batches(id),
+                position INTEGER NOT NULL,
+                server_alias TEXT NOT NULL,
+                server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),
+                command TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'approved', 'rejected', 'executed', 'failed')
+                ),
+                result TEXT,
+                approved_by TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                reason TEXT,
+                risk_label TEXT,
+                UNIQUE (batch_id, position)
+            );
+            INSERT INTO batches
+                (id, title, created_at)
+            VALUES
+                ('b1', 'lot', '2026-01-01T00:00:00Z');
+            INSERT INTO commands
+                (id, batch_id, position, server_alias, server_type, command,
+                 status, reason, risk_label, created_at)
+            VALUES
+                ('c1', 'b1', 0, 'srv', 'linux', 'rm -rf /',
+                 'pending', 'cleanup before deploy', 'recursive force delete', '2026-01-01T00:00:00Z'),
+                ('c2', 'b1', 1, 'srv', 'linux', 'whoami',
+                 'approved', 'check identity', NULL, '2026-01-01T00:00:01Z');
+            INSERT INTO schema_version (version, applied_at) VALUES (2, '2026-01-01T00:00:00Z');
+            """
+        )
+        raw.commit()
+
+    init_database(Database(path=db_path))
+
+    with sqlite3.connect(db_path) as raw:
+        raw.row_factory = sqlite3.Row
+        rows = raw.execute(
+            "SELECT id, reason, risk_label FROM commands ORDER BY position"
+        ).fetchall()
+    # Every reason and risk_label that existed on the v2 DB must survive.
+    assert [(r["id"], r["reason"], r["risk_label"]) for r in rows] == [
+        ("c1", "cleanup before deploy", "recursive force delete"),
+        ("c2", "check identity", None),
+    ]
+
+
+def test_migration_handles_preexisting_commands_new(tmp_path: Path) -> None:
+    """Crash-safety follow-up: if a previous failed migration left a
+    ``commands_new`` table behind (between DROP and RENAME), the next
+    ``init_database`` must DROP it before recreating. Without this, the
+    second ``CREATE TABLE commands_new`` would fail with
+    "table commands_new already exists" and the migration would be
+    blocked forever.
+    """
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as raw:
+        _ = raw.executescript(
+            """
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TABLE batches (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                requested_by_agent TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE TABLE commands (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES batches(id),
+                position INTEGER NOT NULL,
+                server_alias TEXT NOT NULL,
+                server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),
+                command TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'approved', 'rejected', 'executed', 'failed')
+                ),
+                result TEXT,
+                approved_by TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                UNIQUE (batch_id, position)
+            );
+            INSERT INTO batches
+                (id, title, created_at)
+            VALUES
+                ('b1', 'lot', '2026-01-01T00:00:00Z');
+            INSERT INTO commands
+                (id, batch_id, position, server_alias, server_type, command, status, created_at)
+            VALUES
+                ('c1', 'b1', 0, 'srv', 'linux', 'uptime', 'pending', '2026-01-01T00:00:00Z');
+            INSERT INTO schema_version (version, applied_at) VALUES (2, '2026-01-01T00:00:00Z');
+            """
+        )
+        raw.commit()
+
+    # Simulate a crashed previous migration: a leftover commands_new table
+    # that would block the migration if we didn't DROP IF EXISTS first.
+    with sqlite3.connect(db_path) as raw:
+        _ = raw.execute(
+            "CREATE TABLE commands_new (id TEXT PRIMARY KEY, leftover INTEGER)"
+        )
+        _ = raw.execute("INSERT INTO commands_new VALUES ('orphan', 1)")
+        raw.commit()
+
+    init_database(Database(path=db_path))
+
+    with sqlite3.connect(db_path) as raw:
+        leftover = raw.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'commands_new'"
+        ).fetchall()
+    assert leftover == [], (
+        "commands_new should have been dropped or renamed to commands"
+    )
+    with sqlite3.connect(db_path) as raw:
+        ids = [r[0] for r in raw.execute("SELECT id FROM commands ORDER BY position")]
+    assert ids == ["c1"]
+
+
+def test_migration_wraps_recreation_in_explicit_transaction(tmp_path: Path) -> None:
+    """The migration script starts with ``BEGIN IMMEDIATE`` and ends with
+    ``COMMIT`` -- otherwise ``conn.executescript`` auto-commits each
+    statement and a crash between them leaves a half-migrated DB.
+
+    We verify this two ways: by reading the source code of
+    ``_widen_commands_status_check_if_needed`` (so a future refactor that
+    drops the transaction boundaries is caught at review time) and by
+    running the migration on a v2 DB and confirming the original
+    command row survives -- if the migration lost the BEGIN, the
+    table swap would happen before the INSERT and a crash mid-way
+    would lose the data.
+    """
+    # 1. Source-level check: BEGIN IMMEDIATE and COMMIT must both appear.
+    import inspect
+
+    from cgate.db import connection as db_connection
+
+    source = inspect.getsource(db_connection._widen_commands_status_check_if_needed)
+    assert "BEGIN IMMEDIATE" in source, (
+        "the migration lost its BEGIN IMMEDIATE -- without an explicit "
+        "transaction, executescript auto-commits each statement and a crash "
+        "between DROP and RENAME orphans every row in commands_new."
+    )
+    assert "COMMIT;" in source, (
+        "the migration lost its COMMIT -- the BEGIN block stays open "
+        "until the connection closes, blocking the rest of init_database."
+    )
+    assert "DROP TABLE IF EXISTS commands_new" in source, (
+        "the migration lost its DROP TABLE IF EXISTS commands_new -- a "
+        "previous crashed migration would leave commands_new behind and "
+        "block the next migration with 'table already exists'."
+    )
+
+    # 2. End-to-end check: run the migration on a v2 DB and confirm the
+    # original data survives. (A missing BEGIN would not break this test
+    # because there is no crash mid-way -- but the source check above
+    # already proves the BEGIN is present. The end-to-end is a smoke
+    # test against the data path itself.)
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as raw:
+        _ = raw.executescript(
+            """
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TABLE batches (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                requested_by_agent TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE TABLE commands (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES batches(id),
+                position INTEGER NOT NULL,
+                server_alias TEXT NOT NULL,
+                server_type TEXT NOT NULL CHECK (server_type IN ('windows', 'linux')),
+                command TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'approved', 'rejected', 'executed', 'failed')
+                ),
+                result TEXT,
+                approved_by TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                UNIQUE (batch_id, position)
+            );
+            INSERT INTO batches
+                (id, title, created_at)
+            VALUES
+                ('b1', 'lot', '2026-01-01T00:00:00Z');
+            INSERT INTO commands
+                (id, batch_id, position, server_alias, server_type, command, status, created_at)
+            VALUES
+                ('c1', 'b1', 0, 'srv', 'linux', 'uptime', 'pending', '2026-01-01T00:00:00Z');
+            INSERT INTO schema_version (version, applied_at) VALUES (2, '2026-01-01T00:00:00Z');
+            """
+        )
+        raw.commit()
+
+    init_database(Database(path=db_path))
+
+    with sqlite3.connect(db_path) as raw:
+        raw.row_factory = sqlite3.Row
+        sql = raw.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'commands'"
+        ).fetchone()[0]
+        ids = [r[0] for r in raw.execute("SELECT id FROM commands ORDER BY position")]
+    assert "'executing'" in sql, "the migration did not run"
+    assert ids == ["c1"], "the original command row was lost"
 
