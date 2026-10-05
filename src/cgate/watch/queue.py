@@ -83,26 +83,48 @@ def fail_orphaned_approvals(
     commands: CommandsRepo,
     *,
     stuck_threshold_seconds: int = 120,
+    executor_timeout_seconds: float = 60.0,
 ) -> None:
     """Mark commands orphaned by a crashed executor.
 
     Two flavors of orphan, distinguishable by the executor's CAS claim
     (issue #38):
 
-    - ``APPROVED`` with no ``claimed_at``: the process died between
-      ``mark_approved`` and the CAS to ``EXECUTING`` -- the executor never
-      started. Always an orphan.
+    - ``APPROVED``: the process died between ``mark_approved`` and the
+      CAS to ``EXECUTING`` -- the executor never started. Always an
+      orphan. (Heads-up -- there is a millisecond-scale window between
+      ``mark_approved`` and the CAS where the row is ``APPROVED`` but a
+      live executor is mid-CAS. ``execute_and_finalize`` would lose the
+      CAS for that caller and we would mark FAILED here; the executor's
+      command would NOT run twice because the CAS protected it.)
 
-    - ``EXECUTING`` with stale ``claimed_at`` (older than
-      ``stuck_threshold_seconds``): the process claimed the command, ran
-      into the network call, and then died. We recover here too so the
-      batch does not sit stuck in EXECUTING forever.
+    # ``EXECUTING`` with stale ``claimed_at`` (older than the effective
+      threshold): the process claimed the command, ran into the
+      network call, and then died. We recover here too so the batch
+      does not sit stuck in EXECUTING forever.
 
     Live ``EXECUTING`` commands -- fresh ``claimed_at`` -- are left alone.
     Without this distinction, ``cgate watch`` starting on a machine that
     is still running an AUTO-mode executor would mark that executor's
     in-flight commands FAILED and clobber their audit trail (issue #38).
+
+    The effective stuck threshold is ``max(stuck_threshold_seconds,
+    executor_timeout_seconds + 60)`` -- an operator who configures a
+    longer ``timeout=300`` for slow commands gets a stuck threshold of
+    360s, so a legitimately slow command does not get marked FAILED just
+    because the heal ran at the 120s mark.
     """
+    # ``executor_timeout_seconds`` of 0 means "no automatic extension --
+    # use ``stuck_threshold_seconds`` as-is" (used by tests to keep the
+    # threshold deterministic). Otherwise the heal threshold scales with
+    # the executor timeout so a legitimately slow command (e.g. with
+    # ``timeout=300``) is not marked FAILED at the heal's marker.
+    if executor_timeout_seconds > 0:
+        effective_threshold = max(
+            stuck_threshold_seconds, int(executor_timeout_seconds) + 60
+        )
+    else:
+        effective_threshold = stuck_threshold_seconds
     now = datetime.now(UTC)
     for command in commands.list_by_status(CommandStatus.APPROVED):
         _ = commands.update_status(
@@ -129,7 +151,7 @@ def fail_orphaned_approvals(
             )
             continue
         age = (now - command.claimed_at).total_seconds()
-        if age > stuck_threshold_seconds:
+        if age > effective_threshold:
             _ = commands.update_status(
                 command.id,
                 status=CommandStatus.FAILED,
@@ -137,16 +159,23 @@ def fail_orphaned_approvals(
                 result=(
                     f"interrupted before completion "
                     f"(claimed_at {age:.0f}s old, threshold "
-                    f"{stuck_threshold_seconds}s)"
+                    f"{effective_threshold}s)"
                 ),
                 expected_status=CommandStatus.EXECUTING,
             )
 
 
-def heal_queue(batches: BatchesRepo, commands: CommandsRepo) -> None:
+def heal_queue(
+    batches: BatchesRepo,
+    commands: CommandsRepo,
+    *,
+    executor_timeout_seconds: float = 60.0,
+) -> None:
     """Repair queue state left inconsistent by a crash or a since-fixed bug.
 
     Runs once when `cgate watch` starts, before the dashboard is shown.
+    ``executor_timeout_seconds`` is propagated to ``fail_orphaned_approvals``
+    so the heal threshold scales with the configured executor timeout.
     """
-    fail_orphaned_approvals(commands)
+    fail_orphaned_approvals(commands, executor_timeout_seconds=executor_timeout_seconds)
     resolve_stale_batches(batches, commands)

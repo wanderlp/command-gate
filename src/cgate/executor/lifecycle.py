@@ -29,6 +29,7 @@ from __future__ import annotations
 import getpass
 from typing import TYPE_CHECKING
 
+from cgate.core.update_log import append_log
 from cgate.db.commands import all_terminal
 from cgate.db.types import CommandStatus
 from cgate.executor import selector
@@ -128,7 +129,7 @@ def execute_and_finalize(  # noqa: PLR0913 - signature follows the required repo
     The fix is the two-step CAS state machine:
 
       APPROVED --[CAS APPROVED->EXECUTING, stamps claimed_at]--> EXECUTING
-                                                                 --[remote done]--> EXECUTED | FAILED
+                                                               --[remote done]--> EXECUTED | FAILED
 
     ``execute_and_finalize`` does the ``APPROVED -> EXECUTING`` transition
     through ``update_status(expected_status=APPROVED)``. If the CAS loses
@@ -173,7 +174,7 @@ def execute_and_finalize(  # noqa: PLR0913 - signature follows the required repo
 
     try:
         result = selector.execute_command(connection, command.command, timeout=timeout)
-    except Exception as exc:  # noqa: BLE001 - the executor surfaces generic Exception subclasses; we want every transport failure here
+    except Exception as exc:
         _ = commands.update_status(
             command_id,
             status=CommandStatus.FAILED,
@@ -193,13 +194,29 @@ def execute_and_finalize(  # noqa: PLR0913 - signature follows the required repo
         separator = "\n" if output else ""
         output = f"{output}{separator}--- stderr ---\n{result.stderr}"
 
-    _ = commands.update_status(
+    terminal_won = commands.update_status(
         command_id,
         status=status,
         approved_by=approver,
         result=output,
         expected_status=CommandStatus.EXECUTING,
     )
+    if not terminal_won:
+        # The terminal CAS lost -- the row is no longer in EXECUTING
+        # because the startup heal already marked it FAILED. Our
+        # executor ran the command successfully (the network call
+        # returned), but the audit trail will record FAILED (the heal's
+        # stamp), not EXECUTED. Log so the operator can investigate
+        # rather than silently losing the result. The caller still gets
+        # ``(Command(FAILED), None)`` -- nothing was persisted, so the
+        # return-value contract matches the persisted state.
+        append_log(
+            f"execute_and_finalize: command {command_id} ran successfully "
+            f"(exit={result.exit_code}, duration={result.duration_ms}ms) but "
+            f"the heal marked it FAILED before the terminal CAS could stamp "
+            f"EXECUTED. The result was not persisted; the heal's FAILED "
+            f"stamp is in the audit trail."
+        )
     updated = commands.get(command_id)
     if updated is None:
         raise CommandDisappearedError(command_id)

@@ -932,8 +932,10 @@ def test_executor_exception_marks_command_failed_with_expected_status_guard(
     class FakeConnectionError(RuntimeError):
         """Stand-in for SSH / WinRM transport failures the executor surfaces."""
 
+    _err = "connection refused"
+
     def fake_execute(*_args: object, **_kwargs: object) -> object:
-        raise FakeConnectionError("connection refused")
+        raise FakeConnectionError(_err)
 
     with patch("cgate.executor.selector.execute_command", side_effect=fake_execute):
         updated, result = execute_and_finalize(
@@ -1086,7 +1088,11 @@ def test_heal_stuck_threshold_is_configurable(repos: Repos) -> None:
         expected_status=CommandStatus.APPROVED,
     )
 
-    fail_orphaned_approvals(repos.commands, stuck_threshold_seconds=1)
+    fail_orphaned_approvals(
+        repos.commands,
+        stuck_threshold_seconds=1,
+        executor_timeout_seconds=0,
+    )
 
     after = repos.commands.get(cmd.id)
     assert after is not None
