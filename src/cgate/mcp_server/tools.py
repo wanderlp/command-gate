@@ -174,16 +174,18 @@ def _execute_auto(  # noqa: PLR0913
             "reason": queued.reason,
             "risk_label": queued.risk_label,
         }
-    updated, execution = execute_and_finalize(
+    updated, _execution = execute_and_finalize(
         db=db,
         commands=commands_repo,
         connections=connections_repo,
         batches=batches_repo,
         command_id=CommandId(queued.id),
     )
-    output = execution.stdout if execution is not None else None
-    if output and execution and execution.stderr:
-        output = f"{output}\n--- stderr ---\n{execution.stderr}"
+    # ``updated.result`` is what the lifecycle persisted: stdout plus the
+    # ``--- stderr ---`` section (also for stderr-only failures), or the
+    # ``executor raised: ...`` message when the transport blew up. Reading
+    # it back keeps the agent's view identical to the audit trail.
+    output = updated.result if updated is not None else None
     status = updated.status if updated is not None else CommandStatus.EXECUTED
     return {
         "batch_id": queued.batch_id,

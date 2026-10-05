@@ -98,7 +98,7 @@ def fail_orphaned_approvals(
       CAS for that caller and we would mark FAILED here; the executor's
       command would NOT run twice because the CAS protected it.)
 
-    # ``EXECUTING`` with stale ``claimed_at`` (older than the effective
+    - ``EXECUTING`` with stale ``claimed_at`` (older than the effective
       threshold): the process claimed the command, ran into the
       network call, and then died. We recover here too so the batch
       does not sit stuck in EXECUTING forever.

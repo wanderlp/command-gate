@@ -526,3 +526,70 @@ def test_mcp_server_returns_error_on_missing_required_argument(
         assert json.loads(result.content[0].text)["error"] == "missing_argument"
 
     anyio.run(_with_client, action)
+
+
+def _auto_ready_db(tmp_path: Path) -> Database:
+    db = _db(tmp_path)
+    _add_connection(db)
+    _ = AppModeRepo(db).set(mode=Mode.AUTO, updated_by="test")
+    _ = ServerSettingsRepo(db).set(alias="srv", auto_allowed=True, updated_by="test")
+    return db
+
+
+def test_propose_command_auto_returns_stderr_when_stdout_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """issues #36/#38 review: a failing command that writes only to stderr
+    (permission denied, command not found) must still surface its stderr
+    to the agent. The refactor to ``execute_and_finalize`` once dropped it
+    whenever stdout was empty."""
+    db = _auto_ready_db(tmp_path)
+
+    def fake_execute(_connection: Connection, _command: str, **_kwargs: object) -> ExecutionResult:
+        return ExecutionResult(
+            stdout="", stderr="permission denied", exit_code=1, duration_ms=1, error_kind=None
+        )
+
+    monkeypatch.setattr(cgate.executor.selector, "execute_command", fake_execute)
+    result = _propose(db)
+    assert result["status"] == "failed"
+    returned = result.get("result")
+    assert returned is not None
+    assert "permission denied" in returned
+    stored = CommandsRepo(db).get(CommandId(result["command_id"]))
+    assert stored is not None
+    assert returned == stored.result
+
+
+def test_propose_command_auto_returns_stdout_and_stderr_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _auto_ready_db(tmp_path)
+
+    def fake_execute(_connection: Connection, _command: str, **_kwargs: object) -> ExecutionResult:
+        return ExecutionResult(
+            stdout="partial", stderr="warn", exit_code=0, duration_ms=1, error_kind=None
+        )
+
+    monkeypatch.setattr(cgate.executor.selector, "execute_command", fake_execute)
+    result = _propose(db)
+    assert result.get("result") == "partial\n--- stderr ---\nwarn"
+
+
+def test_propose_command_auto_reports_executor_exception_to_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the transport raises, the row ends FAILED and the agent sees why
+    (not ``result: None``)."""
+    db = _auto_ready_db(tmp_path)
+
+    def fake_execute(_connection: Connection, _command: str, **_kwargs: object) -> ExecutionResult:
+        msg = "connection refused"
+        raise ConnectionError(msg)
+
+    monkeypatch.setattr(cgate.executor.selector, "execute_command", fake_execute)
+    result = _propose(db)
+    assert result["status"] == "failed"
+    returned = result.get("result")
+    assert returned is not None
+    assert "connection refused" in returned

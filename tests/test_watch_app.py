@@ -1097,3 +1097,50 @@ def test_heal_stuck_threshold_is_configurable(repos: Repos) -> None:
     after = repos.commands.get(cmd.id)
     assert after is not None
     assert after.status is CommandStatus.FAILED
+
+
+def test_terminal_cas_loss_is_logged_and_keeps_heal_stamp(
+    repos: Repos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """issue #38 follow-up: the heal runs *between* the executor's CAS claim
+    and its terminal write (the genuine zombie-executor race). The terminal
+    write must lose the CAS, the heal's FAILED stamp must survive, and the
+    lost result must be logged so the operator can investigate."""
+    monkeypatch.setattr("cgate.core.paths.data_dir", lambda: tmp_path)
+    lot = repos.batches.create(title="lot", description=None, requested_by_agent=None)
+    cmd = repos.commands.add(
+        batch_id=lot.id, server_alias="linux-1", server_type=ServerType.LINUX, command="uptime"
+    )
+    _ = repos.connections.add(
+        alias="linux-1",
+        hostname="linux.example",
+        server_type=ServerType.LINUX,
+        detection_ssh=True,
+        detection_winrm=False,
+    )
+    _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
+
+    def fake_execute(*_args: object, **_kwargs: object) -> ExecutionResult:
+        # Mid-call: a heal with a negative threshold treats the live claim as stuck.
+        fail_orphaned_approvals(
+            repos.commands, stuck_threshold_seconds=-1, executor_timeout_seconds=0
+        )
+        return _success()
+
+    with patch("cgate.executor.selector.execute_command", side_effect=fake_execute):
+        updated, result = execute_and_finalize(
+            db=repos.db,
+            commands=repos.commands,
+            connections=repos.connections,
+            batches=repos.batches,
+            command_id=cmd.id,
+        )
+
+    assert result is not None
+    assert updated is not None
+    assert updated.status is CommandStatus.FAILED
+    assert updated.result is not None
+    assert "interrupted before completion" in updated.result
+    log_text = (tmp_path / "update.log").read_text(encoding="utf-8")
+    assert str(cmd.id) in log_text
+    assert "was not persisted" in log_text
