@@ -314,7 +314,7 @@ def test_mark_approved_transitions_pending_to_approved_without_executing(repos: 
     _add_connection(repos)
     cmd = _command(repos)
 
-    with patch("cgate.watch.approval.execute_command") as execute:
+    with patch("cgate.executor.selector.execute_command") as execute:
         updated = mark_approved(
             commands=repos.commands, connections=repos.connections, command_id=cmd.id
         )
@@ -336,7 +336,7 @@ def test_execute_and_finalize_runs_the_executor_and_marks_executed(repos: Repos)
     cmd = _command(repos)
     _ = mark_approved(commands=repos.commands, connections=repos.connections, command_id=cmd.id)
 
-    with patch("cgate.watch.approval.execute_command", return_value=_success()) as execute:
+    with patch("cgate.executor.selector.execute_command", return_value=_success()) as execute:
         updated, result = execute_and_finalize(
             db=repos.db,
             commands=repos.commands,
@@ -357,7 +357,7 @@ def test_execute_and_finalize_noops_when_not_approved(repos: Repos) -> None:
     _add_connection(repos)
     cmd = _command(repos)
 
-    with patch("cgate.watch.approval.execute_command") as execute:
+    with patch("cgate.executor.selector.execute_command") as execute:
         updated, result = execute_and_finalize(
             db=repos.db,
             commands=repos.commands,
@@ -376,7 +376,7 @@ def test_approve_one_marks_executed_and_calls_executor(repos: Repos) -> None:
     _add_connection(repos)
     cmd = _command(repos)
 
-    with patch("cgate.watch.approval.execute_command", return_value=_success()) as execute:
+    with patch("cgate.executor.selector.execute_command", return_value=_success()) as execute:
         updated, result = approve_one(
             db=repos.db,
             commands=repos.commands,
@@ -396,7 +396,7 @@ def test_approve_one_marks_failed_when_executor_returns_error(repos: Repos) -> N
     cmd = _command(repos)
     failed = ExecutionResult("", "denied", -1, 9, ErrorKind.AUTH_FAILED)
 
-    with patch("cgate.watch.approval.execute_command", return_value=failed):
+    with patch("cgate.executor.selector.execute_command", return_value=failed):
         updated, result = approve_one(
             db=repos.db,
             commands=repos.commands,
@@ -418,7 +418,7 @@ def test_approve_one_does_not_execute_when_it_loses_the_race(repos: Repos) -> No
     cmd = _command(repos)
 
     with (
-        patch("cgate.watch.approval.execute_command") as execute,
+        patch("cgate.executor.selector.execute_command") as execute,
         patch.object(repos.commands, "update_status", return_value=False) as update_status,
     ):
         updated, result = approve_one(
@@ -439,7 +439,7 @@ def test_approve_one_does_not_execute_when_it_loses_the_race(repos: Repos) -> No
 def test_reject_one_marks_rejected_and_does_not_execute(repos: Repos) -> None:
     cmd = _command(repos)
 
-    with patch("cgate.watch.approval.execute_command") as execute:
+    with patch("cgate.executor.selector.execute_command") as execute:
         updated = reject_one(
             commands=repos.commands,
             batches=repos.batches,
@@ -459,7 +459,7 @@ def test_approve_remaining_processes_all_pending(repos: Repos) -> None:
         for index in range(COMMAND_COUNT)
     ]
 
-    with patch("cgate.watch.approval.execute_command", return_value=_success()) as execute:
+    with patch("cgate.executor.selector.execute_command", return_value=_success()) as execute:
         results = approve_remaining(
             db=repos.db,
             commands=repos.commands,
@@ -498,7 +498,7 @@ def test_reject_remaining_processes_all_pending_without_executor(repos: Repos) -
         for index in range(COMMAND_COUNT)
     ]
 
-    with patch("cgate.watch.approval.execute_command") as execute:
+    with patch("cgate.executor.selector.execute_command") as execute:
         results = reject_remaining(
             commands=repos.commands,
             batches=repos.batches,

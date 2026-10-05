@@ -18,7 +18,7 @@ from cgate.db.commands import CommandsRepo
 from cgate.db.connection import Database, init_database
 from cgate.db.mode import AppModeRepo, Mode
 from cgate.db.server_settings import ServerSettingsRepo
-from cgate.db.types import BatchId, CommandStatus, ServerType
+from cgate.db.types import BatchId, CommandId, CommandStatus, ServerType
 from cgate.executor.base import ExecutionResult
 from cgate.mcp_server import build_server
 from cgate.mcp_server.tools import (
@@ -68,6 +68,7 @@ def _propose(db: Database, **overrides: str | None) -> ProposeCommandResult:
         **overrides,
     }
     return propose_command(
+        db=db,
         batches_repo=batches,
         commands_repo=commands,
         connections_repo=connections,
@@ -227,6 +228,65 @@ def test_propose_command_executes_in_auto_mode_when_server_opted_in(
     batch = BatchesRepo(db).get(BatchId(str(result["batch_id"])))
     assert batch is not None
     assert batch.resolved_at is not None
+
+
+def test_propose_command_auto_delegates_to_execute_and_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """issue #36 review blocker #1: the MCP AUTO path used to duplicate
+    ``execute_and_finalize``'s body inline (PENDING -> APPROVED ->
+    execute_command -> terminal write), bypassing the CAS-claim guard
+    that prevents two callers from racing through to a double remote
+    execution. The refactor delegates to the shared
+    ``execute_and_finalize`` from ``cgate.executor.lifecycle`` -- the same
+    function the watch TUI's ``approve_one`` uses, so the two callers
+    cannot diverge.
+
+    This test verifies the delegation by checking that ``execute_command``
+    is called via ``cgate.executor.selector`` -- the module the shared
+    lifecycle imports -- rather than through a private path. A monkeypatch
+    on ``cgate.executor.selector.execute_command`` is what reaches the
+    test's fake. If the MCP path had its own inline call, the
+    monkeypatch would NOT be observed (the test would see the real
+    executor). The test therefore pins the architectural decision, not just
+    the end behavior.
+
+    We also assert ``claimed_at`` was stamped, which is the lifecycle's
+    signature on the way through the EXECUTING CAS.
+    """
+    db = _db(tmp_path)
+    _add_connection(db)
+    _ = AppModeRepo(db).set(mode=Mode.AUTO, updated_by="test")
+    _ = ServerSettingsRepo(db).set(alias="srv", auto_allowed=True, updated_by="test")
+
+    captured: list[str] = []
+
+    def fake_execute(_connection: Connection, _command: str, **_kwargs: object) -> ExecutionResult:
+        # Read the row's claimed_at via the executor's commands_repo is
+        # not in scope here, but the call itself proves the shared lifecycle
+        # was used (otherwise ``cgate.executor.selector.execute_command``
+        # would not have been called).
+        captured.append("called")
+        return ExecutionResult(
+            stdout="ok", stderr="", exit_code=0, duration_ms=1, error_kind=None
+        )
+
+    monkeypatch.setattr(cgate.executor.selector, "execute_command", fake_execute)
+    monkeypatch.setattr(getpass, "getuser", lambda: "testuser")
+    result = _propose(db)
+    assert result["status"] == "executed"
+    assert captured == ["called"]
+    # The CAS-claim stamp is the only durable proof that we went through
+    # ``execute_and_finalize`` (vs. an inline duplicate). Re-fetch the
+    # command and check claimed_at is non-NULL.
+    cmd_id = result["command_id"]
+    cmd_row = CommandsRepo(db).get(CommandId(cmd_id))
+    assert cmd_row is not None
+    assert cmd_row.claimed_at is not None, (
+        "claimed_at is the lifecycle's stamp on the CAS-claim step; if "
+        "it is NULL the MCP path went through an inline duplicate of "
+        "the lifecycle, bypassing the CAS-claim guard."
+    )
 
 
 def test_propose_command_queues_a_risky_command_even_in_auto_mode_when_opted_in(

@@ -212,7 +212,7 @@ def test_approve_one_executes_and_advances(repos: Repos) -> None:
     )
 
     async def scenario() -> None:
-        with patch("cgate.watch.approval.execute_command", return_value=_success()):
+        with patch("cgate.executor.selector.execute_command", return_value=_success()):
             async with _app(repos).run_test() as pilot:
                 await pilot.pause()
                 await pilot.press("y")
@@ -343,7 +343,7 @@ def test_approve_after_pinning_acts_on_the_pinned_batch_not_fifo_first(repos: Re
     )
 
     async def scenario() -> None:
-        with patch("cgate.watch.approval.execute_command", return_value=_success()):
+        with patch("cgate.executor.selector.execute_command", return_value=_success()):
             async with _app(repos).run_test() as pilot:
                 await pilot.pause()
                 pilot.app.query_one("#queue-list", ListView).focus()
@@ -679,7 +679,7 @@ def test_execute_and_finalize_cas_marks_row_executing_with_claim_timestamp(
     )
     _ = repos.commands.update_status(cmd.id, status=CommandStatus.APPROVED)
 
-    with patch("cgate.watch.approval.execute_command", return_value=_success()):
+    with patch("cgate.executor.selector.execute_command", return_value=_success()):
         updated, _ = execute_and_finalize(
             db=repos.db,
             commands=repos.commands,
@@ -724,7 +724,7 @@ def test_execute_and_finalize_backs_off_when_row_already_executing(repos: Repos)
         expected_status=CommandStatus.APPROVED,
     )
 
-    with patch("cgate.watch.approval.execute_command") as execute:
+    with patch("cgate.executor.selector.execute_command") as execute:
         updated, result = execute_and_finalize(
             db=repos.db,
             commands=repos.commands,
@@ -795,7 +795,7 @@ def test_two_concurrent_execute_and_finalize_invoke_executor_at_most_once(
 
     def runner() -> None:
         with (
-            patch("cgate.watch.approval.execute_command", return_value=_success()),
+            patch("cgate.executor.selector.execute_command", return_value=_success()),
             patch.object(
                 repos.commands,
                 "update_status",
@@ -883,7 +883,7 @@ def test_executor_terminal_write_is_a_noop_when_heal_already_marked_failed(
 
     # The original (zombie) executor's network call now returns and
     # tries to write the success result. The CAS must lose.
-    with patch("cgate.watch.approval.execute_command", return_value=_success()):
+    with patch("cgate.executor.selector.execute_command", return_value=_success()):
         updated, _ = execute_and_finalize(
             db=repos.db,
             commands=repos.commands,
