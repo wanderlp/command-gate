@@ -19,13 +19,23 @@ class ServerType(StrEnum):
 class CommandStatus(StrEnum):
     """Lifecycle of a single command in a batch.
 
-    Flow: PENDING -> APPROVED -> EXECUTED (or PENDING -> REJECTED / FAILED).
-    APPROVED and PENDING are non-terminal (resolved_at IS NULL).
+    Flow:
+        PENDING -> APPROVED --[CAS claim]--> EXECUTING --[remote done]--> EXECUTED | FAILED
+        PENDING -> REJECTED
+
+    Terminal statuses (resolved_at is stamped, batch can resolve): EXECUTED,
+    REJECTED, FAILED. Non-terminal: PENDING, EXECUTING. APPROVED sits between
+    the human approval and the executor's CAS-claim; once the CAS succeeds,
+    the row moves to EXECUTING and stays there for the duration of the
+    remote call -- a separate process holding an EXECUTING row is the
+    signal ``fail_orphaned_approvals`` uses to know the command is live
+    (issues #36, #38).
     """
 
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    EXECUTING = "executing"
     EXECUTED = "executed"
     FAILED = "failed"
 
@@ -48,7 +58,14 @@ class Batch:
 
 @dataclass(frozen=True, slots=True)
 class Command:
-    """A single command within a batch, addressed to one server."""
+    """A single command within a batch, addressed to one server.
+
+    ``claimed_at`` is set by the executor when it CAS-claims the row into
+    EXECUTING (issues #36, #38). ``None`` for every other state. A live
+    executor process keeps ``claimed_at`` recent (within its `timeout +
+    grace`); a process that died mid-execution leaves it stale, which is
+    how the heal detects orphaned EXECUTING rows.
+    """
 
     id: CommandId
     batch_id: BatchId
@@ -61,6 +78,7 @@ class Command:
     approved_by: str | None
     created_at: datetime
     resolved_at: datetime | None
+    claimed_at: datetime | None
     reason: str | None
     risk_label: str | None
 

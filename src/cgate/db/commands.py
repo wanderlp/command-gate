@@ -101,6 +101,7 @@ class CommandsRepo:
             approved_by=None,
             created_at=now,
             resolved_at=None,
+            claimed_at=None,
             reason=reason,
             risk_label=risk_label,
         )
@@ -112,7 +113,7 @@ class CommandsRepo:
                 """
                 SELECT id, batch_id, position, server_alias, server_type,
                     command, status, result, approved_by, created_at, resolved_at,
-                    reason, risk_label
+                    claimed_at, reason, risk_label
                 FROM commands WHERE id = ?
                 """,
                 (command_id,),
@@ -126,7 +127,7 @@ class CommandsRepo:
                 """
                 SELECT id, batch_id, position, server_alias, server_type,
                     command, status, result, approved_by, created_at, resolved_at,
-                    reason, risk_label
+                    claimed_at, reason, risk_label
                 FROM commands WHERE batch_id = ?
                 ORDER BY position ASC
                 """,
@@ -141,14 +142,14 @@ class CommandsRepo:
                 """
                 SELECT id, batch_id, position, server_alias, server_type,
                     command, status, result, approved_by, created_at, resolved_at,
-                    reason, risk_label
+                    claimed_at, reason, risk_label
                 FROM commands WHERE status = ?
                 """,
                 (status.value,),
             ).fetchall()
         return [row_to_command(r) for r in rows]
 
-    def update_status(
+    def update_status(  # noqa: PLR0913 - signature mirrors the persisted command fields; merging claimed_at onto the existing transaction write is cheaper than splitting it
         self,
         command_id: CommandId,
         *,
@@ -156,6 +157,7 @@ class CommandsRepo:
         approved_by: str | None = None,
         result: str | None = None,
         expected_status: CommandStatus | None = None,
+        claimed_at: datetime | None = None,
     ) -> bool:
         """Transition a command's status; stamp resolved_at iff status is terminal.
 
@@ -165,27 +167,40 @@ class CommandsRepo:
         exploitable in today's single-process synchronous `watch`, but a
         cheap guard against a future daemon/concurrent mode). Returns
         whether the row was actually updated.
+
+        When ``status`` is EXECUTING and ``claimed_at`` is not provided,
+        the current time is stamped automatically -- this is the executor
+        CAS-claiming the row and the timestamp is what ``fail_orphaned_approvals``
+        keys off to tell live processes from dead ones (issue #38).
+        Passing ``claimed_at`` explicitly is supported for tests.
         """
         guard = " AND status = ?" if expected_status is not None else ""
         guard_params = (expected_status.value,) if expected_status is not None else ()
+        now = datetime.now(UTC)
+        if status in _TERMINAL_STATUSES:
+            set_clause = "status = ?, approved_by = ?, result = ?, resolved_at = ?"
+            params: tuple[object, ...] = (
+                status.value,
+                approved_by,
+                result,
+                iso(now),
+                command_id,
+                *guard_params,
+            )
+        elif status is CommandStatus.EXECUTING:
+            # EXECUTING is non-terminal but DOES need the claimed_at stamp
+            # set -- it's the heal's "is this process alive?" signal.
+            stamp = iso(claimed_at) if claimed_at is not None else iso(now)
+            set_clause = "status = ?, claimed_at = ?, approved_by = ?, result = ?"
+            params = (status.value, stamp, approved_by, result, command_id, *guard_params)
+        else:
+            set_clause = "status = ?, approved_by = ?, result = ?"
+            params = (status.value, approved_by, result, command_id, *guard_params)
         with connect(self._db) as conn:
-            if status in _TERMINAL_STATUSES:
-                cursor = conn.execute(
-                    "UPDATE commands SET status = ?, approved_by = ?, result = ?, "  # noqa: S608 -- guard is one of two fixed literals, never user input
-                    f"resolved_at = ? WHERE id = ?{guard}",
-                    (
-                        status.value,
-                        approved_by,
-                        result,
-                        iso(datetime.now(UTC)),
-                        command_id,
-                        *guard_params,
-                    ),
-                )
-            else:
-                cursor = conn.execute(
-                    "UPDATE commands SET status = ?, approved_by = ?, result = ? "  # noqa: S608 -- guard is one of two fixed literals, never user input
-                    f"WHERE id = ?{guard}",
-                    (status.value, approved_by, result, command_id, *guard_params),
-                )
+            # set_clause is one of three fixed literals; guard is one of two;
+            # neither is ever built from request, function arg, or user input.
+            cursor = conn.execute(
+                f"UPDATE commands SET {set_clause} WHERE id = ?{guard}",  # noqa: S608
+                params,
+            )
         return cursor.rowcount > 0

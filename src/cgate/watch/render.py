@@ -20,6 +20,7 @@ _RESULT_SNIPPET_MAX_CHARS: Final = 200
 _STATUS_GLYPHS: Final[dict[CommandStatus, str]] = {
     CommandStatus.PENDING: f"[{CGATE_THEME.warning}]●[/{CGATE_THEME.warning}]",
     CommandStatus.APPROVED: f"[{CGATE_THEME.warning}]◐[/{CGATE_THEME.warning}]",
+    CommandStatus.EXECUTING: f"[{CGATE_THEME.warning}]◐[/{CGATE_THEME.warning}]",
     CommandStatus.EXECUTED: f"[{CGATE_THEME.success}]✓[/{CGATE_THEME.success}]",
     CommandStatus.REJECTED: f"[{CGATE_THEME.error}]✗[/{CGATE_THEME.error}]",
     CommandStatus.FAILED: f"[{CGATE_THEME.error}]✗[/{CGATE_THEME.error}]",
@@ -117,7 +118,14 @@ def format_command_line(command: Command) -> str:
         line += f"\n    {risk_warning(command.risk_label)}"
     if command.reason:
         line += f"\n    [dim italic]↳ {escape_markup(command.reason)}[/dim italic]"
-    if command.status is CommandStatus.APPROVED:
+    # APPROVED (queued, executor about to CAS) and EXECUTING (CAS-claimed,
+    # remote call in flight) both render the "running" hint. The two are
+    # transient and indistinguishable from the TUI's perspective -- the
+    # CAS happens in the same poll tick the human sees the approval.
+    if (
+        command.status is CommandStatus.APPROVED
+        or command.status is CommandStatus.EXECUTING
+    ):
         line += "\n    [dim]⏳ running…[/dim]"
     elif command.status is CommandStatus.EXECUTED and command.result:
         line += f"\n    [dim]{escape_markup(_result_snippet(command.result))}[/dim]"

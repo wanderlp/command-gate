@@ -4,10 +4,9 @@ from __future__ import annotations
 import getpass
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
-from cgate.db.commands import all_terminal
 from cgate.db.mode import AppModeNotSetError, Mode
-from cgate.db.types import BatchId, CommandStatus
-from cgate.executor import selector
+from cgate.db.types import BatchId, CommandId, CommandStatus
+from cgate.executor.lifecycle import execute_and_finalize
 from cgate.mcp_server.auto_resolution import resolve_auto_behavior
 from cgate.risk import find_risk
 
@@ -15,6 +14,7 @@ if TYPE_CHECKING:
     from cgate.connections.store import ConnectionsRepo
     from cgate.db.batches import BatchesRepo
     from cgate.db.commands import CommandsRepo
+    from cgate.db.connection import Database
     from cgate.db.mode import AppModeRepo
     from cgate.db.server_settings import ServerSettingsRepo
     from cgate.db.types import Command, Connection
@@ -127,11 +127,12 @@ def _auto_approve_by() -> str:
         return "auto:mcp"
 
 
-def _execute_auto(
+def _execute_auto(  # noqa: PLR0913
     *,
+    db: Database,
     batches_repo: BatchesRepo,
     commands_repo: CommandsRepo,
-    connection: Connection,
+    connections_repo: ConnectionsRepo,
     queued: Command,
     decision: BehaviorDecision,
 ) -> ProposeCommandResult:
@@ -140,6 +141,14 @@ def _execute_auto(
     The connection is guaranteed present: ``_require_known_alias`` already
     converted a missing alias into ToolError("unknown_alias") before insert,
     so approve_one's ConnectionNotFoundError path is unreachable here.
+
+    Implementation delegates to the shared ``execute_and_finalize`` from
+    ``cgate.executor.lifecycle`` -- the same CAS-claim-and-execute pattern
+    the watch TUI uses, so a TUI approval and an MCP AUTO execution
+    cannot race past each other to invoke the remote executor twice.
+    Without this dedup, the `propose_command` flow would still be open to
+    the same race issue #36 fixed for the watch path (issue #36 review
+    blocker #1).
     """
     approver = _auto_approve_by()
     approved = commands_repo.update_status(
@@ -165,24 +174,19 @@ def _execute_auto(
             "reason": queued.reason,
             "risk_label": queued.risk_label,
         }
-    execution = selector.execute_command(connection, queued.command)
-    status = CommandStatus.EXECUTED if execution.ok else CommandStatus.FAILED
-    output = execution.stdout
-    if execution.stderr:
-        separator = "\n" if output else ""
-        output = f"{output}{separator}--- stderr ---\n{execution.stderr}"
-    _ = commands_repo.update_status(
-        queued.id,
-        status=status,
-        approved_by=approver,
-        result=output,
+    updated, _execution = execute_and_finalize(
+        db=db,
+        commands=commands_repo,
+        connections=connections_repo,
+        batches=batches_repo,
+        command_id=CommandId(queued.id),
     )
-    # Auto-execution bypasses watch/approval.py entirely, so nothing else
-    # ever stamps `resolved_at` for this batch -- without this, a fully
-    # terminal batch sits at the head of the FIFO queue forever, blocking
-    # every batch behind it from ever becoming approvable.
-    if all_terminal(commands_repo.list_for_batch(queued.batch_id)):
-        batches_repo.mark_resolved(queued.batch_id)
+    # ``updated.result`` is what the lifecycle persisted: stdout plus the
+    # ``--- stderr ---`` section (also for stderr-only failures), or the
+    # ``executor raised: ...`` message when the transport blew up. Reading
+    # it back keeps the agent's view identical to the audit trail.
+    output = updated.result if updated is not None else None
+    status = updated.status if updated is not None else CommandStatus.EXECUTED
     return {
         "batch_id": queued.batch_id,
         "command_id": queued.id,
@@ -200,6 +204,7 @@ def _execute_auto(
 
 def propose_command(  # noqa: PLR0913 - boundary mirrors the specified MCP tool arguments.
     *,
+    db: Database,
     batches_repo: BatchesRepo,
     commands_repo: CommandsRepo,
     connections_repo: ConnectionsRepo,
@@ -254,9 +259,10 @@ def propose_command(  # noqa: PLR0913 - boundary mirrors the specified MCP tool 
     )
     if decision["action"] == "execute":
         return _execute_auto(
+            db=db,
             batches_repo=batches_repo,
             commands_repo=commands_repo,
-            connection=connection,
+            connections_repo=connections_repo,
             queued=queued,
             decision=decision,
         )

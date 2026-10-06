@@ -72,6 +72,7 @@ _SERVER_INSTRUCTIONS = (
 class _ToolDeps:
     """Repositories opened independently for one MCP tool invocation."""
 
+    db: Database
     batches: BatchesRepo
     commands: CommandsRepo
     connections: ConnectionsRepo
@@ -82,6 +83,7 @@ class _ToolDeps:
     def from_db(cls, db: Database) -> _ToolDeps:
         """Create the repository set backed by one database path."""
         return cls(
+            db=db,
             batches=BatchesRepo(db),
             commands=CommandsRepo(db),
             connections=ConnectionsRepo(db),
@@ -240,6 +242,7 @@ def build_server() -> Server[None]:
             match params.name:
                 case "propose_command":
                     payload = propose_command(
+                        db=deps.db,
                         batches_repo=deps.batches,
                         commands_repo=deps.commands,
                         connections_repo=deps.connections,
